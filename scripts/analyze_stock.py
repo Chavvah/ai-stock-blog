@@ -123,6 +123,12 @@ class Stock:
     history: Optional[dict] = None  # {"dates": [...], "closes": [...]} 최근 3년 월봉
     supply: Optional[dict] = None   # 수급: {dates, foreign, organ, individual, foreignHold} 최근 10일
     last_close: Optional[dict] = None  # 전일 종가: {price, pct, dir, date, cur}
+    week52_high: Optional[float] = None
+    week52_low: Optional[float] = None
+    target_price: Optional[float] = None   # 목표주가(컨센서스)
+    recomm_mean: Optional[float] = None     # 투자의견 평균(1매수~5매도)
+    volume: Optional[float] = None          # 거래량
+    ai_universe: bool = True                # AI 4개 섹션 분석 대상 여부
 
     def metric(self, key: str) -> Optional[float]:
         return getattr(self, key)
@@ -183,6 +189,84 @@ def synth_supply(stock: Stock) -> None:
         indiv.append(-(f + o))
     stock.supply = {"dates": _last_days(n), "foreign": foreign, "organ": organ,
                     "individual": indiv, "foreignHold": f"{30 + seed % 30}.0%"}
+
+
+def _num_prefix(s) -> Optional[float]:
+    """'29.14배', '377,000' 같은 문자열에서 숫자만 추출."""
+    import re
+    if s is None:
+        return None
+    m = re.search(r"-?[\d,]+\.?\d*", str(s))
+    return _to_num(m.group()) if m else None
+
+
+def fetch_quote(stock: Stock) -> None:
+    """목표주가·52주 고저·거래량·투자의견 — 국내=네이버 통합, 해외=Yahoo."""
+    try:
+        if _is_kr(stock.ticker):
+            import requests
+            code = stock.ticker.split(".")[0]
+            j = requests.get(
+                f"https://m.stock.naver.com/api/stock/{code}/integration",
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"},
+                timeout=12).json()
+            ti = {it.get("key"): it.get("value") for it in j.get("totalInfos", [])}
+            stock.week52_high = _num_prefix(ti.get("52주 최고"))
+            stock.week52_low = _num_prefix(ti.get("52주 최저"))
+            if stock.volume is None:
+                stock.volume = _num_prefix(ti.get("거래량"))
+            if stock.per is None:
+                stock.per = _num_prefix(ti.get("PER"))
+            if stock.pbr is None:
+                stock.pbr = _num_prefix(ti.get("PBR"))
+            ci = j.get("consensusInfo") or {}
+            stock.target_price = _num_prefix(ci.get("priceTargetMean"))
+            stock.recomm_mean = _num_prefix(ci.get("recommMean"))
+        else:
+            import yfinance as yf
+            i = yf.Ticker(stock.ticker).info
+            stock.week52_high = _clean(i.get("fiftyTwoWeekHigh"))
+            stock.week52_low = _clean(i.get("fiftyTwoWeekLow"))
+            stock.volume = _clean(i.get("regularMarketVolume") or i.get("volume"))
+            stock.target_price = _clean(i.get("targetMeanPrice"))
+            stock.recomm_mean = _clean(i.get("recommendationMean"))
+    except Exception as e:  # noqa: BLE001
+        print(f"  [warn] {stock.name} 시세지표 수집 실패: {e}", file=sys.stderr)
+
+
+def collect_kospi(limit: int = 200) -> list[Stock]:
+    """검색용 KOSPI 시총 상위 N종목(기본 시세 + 차트 + 52주/목표가)."""
+    if not os.environ.get("SSL_CERT_FILE"):
+        try:
+            import certifi
+            os.environ["SSL_CERT_FILE"] = certifi.where()
+        except Exception:  # noqa: BLE001
+            pass
+    out: list[Stock] = []
+    try:
+        import FinanceDataReader as fdr
+        df = fdr.StockListing("KOSPI")
+        df = df.dropna(subset=["Marcap"]).sort_values("Marcap", ascending=False).head(limit)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [warn] KOSPI 리스트 수집 실패: {e}", file=sys.stderr)
+        return out
+    for _, r in df.iterrows():
+        code = str(r["Code"])
+        s = Stock(name=str(r["Name"]), ticker=f"{code}.KS", source="kospi",
+                  section="KOSPI 200", currency="KRW", ai_universe=False)
+        try:
+            s.market_cap = round(float(r["Marcap"]) / 1e12, 1)
+            s.volume = float(r["Volume"]) if r.get("Volume") == r.get("Volume") else None
+            close = float(r["Close"]); chg = float(r.get("ChagesRatio") or 0)
+            s.last_close = {"price": close, "pct": round(chg, 2),
+                            "dir": "up" if chg > 0 else ("down" if chg < 0 else "flat"),
+                            "date": "", "cur": "KRW"}
+        except Exception:  # noqa: BLE001
+            pass
+        fetch_quote(s)
+        fetch_history(s)
+        out.append(s)
+    return out
 
 
 SECTION_NEWS_QUERY = {
@@ -309,6 +393,11 @@ def load_sample() -> tuple[list[Stock], str]:
             s.last_close = {"price": c[-1], "pct": pct,
                             "dir": "up" if pct > 0 else ("down" if pct < 0 else "flat"),
                             "date": s.history["dates"][-1], "cur": s.currency or "KRW"}
+            hi, lo = max(c), min(c)
+            s.week52_high, s.week52_low = round(hi, 2), round(lo, 2)
+            s.target_price = round(c[-1] * 1.15, 2)
+            s.recomm_mean = round(2.0 + (sum(ord(x) for x in s.name) % 20) / 10, 1)
+            s.volume = float(1_000_000 + sum(ord(x) for x in s.name) * 7919 % 5_000_000)
             stocks.append(s)
     return stocks, raw.get("as_of", "")
 
@@ -640,6 +729,7 @@ def collect_live() -> tuple[list[Stock], str]:
                     s = fetch_yahoo(r["name"], r["ticker"], section)
                 fetch_history(s)  # 최근 3년 월봉
                 fetch_supply(s)   # 최근 10일 투자자별 순매수(국내)
+                fetch_quote(s)    # 목표가·52주·거래량
                 stocks.append(s)
             except Exception as e:  # noqa: BLE001 — 종목 1건 실패가 전체를 막지 않도록
                 print(f"  [warn] {r['name']}({r['ticker']}) 수집 실패: {e}", file=sys.stderr)
@@ -767,11 +857,26 @@ def pick_top3(stocks: list[Stock]) -> list[Stock]:
     return cands[:3]
 
 
+def _quote_fields(s: Stock) -> dict:
+    return {
+        "marketCap": s.market_cap, "volume": s.volume,
+        "week52High": s.week52_high, "week52Low": s.week52_low,
+        "target": s.target_price, "recommMean": s.recomm_mean,
+        "history": s.history, "lastClose": s.last_close,
+        "per": s.per, "pbr": s.pbr,
+    }
+
+
 def build_dashboard(stocks: list[Stock], top3: list[Stock], as_of: str,
-                    news: Optional[dict]) -> dict:
-    """메인 대시보드(검색·차트·추천여부·뉴스)용 JSON 데이터."""
+                    news: Optional[dict], extra: Optional[list[Stock]] = None) -> dict:
+    """메인 대시보드(검색·차트·추천여부·뉴스)용 JSON 데이터.
+
+    stocks = AI 4개 섹션(정밀 분석), extra = KOSPI 시총상위(기본 시세).
+    중복(국내 AI 종목)은 AI 풀세트를 우선한다.
+    """
     ranks = {t.name: i + 1 for i, t in enumerate(top3)}
     out: dict[str, dict] = {}
+    seen_tickers: set[str] = set()
     for s in stocks:
         rank = ranks.get(s.name)
         if rank:
@@ -787,17 +892,32 @@ def build_dashboard(stocks: list[Stock], top3: list[Stock], as_of: str,
             reasons.append("안전마진: " + ", ".join(s.safety_flags))
         prof = sector_profile(s.section)
         out[s.name] = {
-            "ticker": s.ticker, "section": s.section, "profile": prof,
+            "ticker": s.ticker, "section": s.section, "profile": prof, "ai": True,
             "lens": "유형자산(PBR·EV/EBITDA) 중심" if prof == "hardware"
                     else "자본효율·성장성(ROIC·PEG) 중심",
             "level": level, "verdict": verdict, "rank": rank,
-            "per": s.per, "pbr": s.pbr, "ev_ebitda": s.ev_ebitda,
-            "roic": s.roic, "peg": s.peg,
-            "reasons": reasons, "safety": s.safety_flags,
-            "history": s.history, "supply": s.supply, "lastClose": s.last_close,
+            "ev_ebitda": s.ev_ebitda, "roic": s.roic, "peg": s.peg,
+            "reasons": reasons, "safety": s.safety_flags, "supply": s.supply,
+            **_quote_fields(s),
         }
+        seen_tickers.add(s.ticker)
+
+    for s in (extra or []):
+        if s.ticker in seen_tickers or s.name in out:
+            continue
+        out[s.name] = {
+            "ticker": s.ticker, "section": s.section, "profile": None, "ai": False,
+            "lens": "", "level": "out", "verdict": "AI 분석 대상 외", "rank": None,
+            "ev_ebitda": None, "roic": None, "peg": None,
+            "reasons": ["AI 4개 섹션 유니버스에 포함되지 않은 종목입니다. 기본 시세·차트만 제공합니다."],
+            "safety": [], "supply": None,
+            **_quote_fields(s),
+        }
+        seen_tickers.add(s.ticker)
+
     return {"as_of": as_of, "top3": [t.name for t in top3],
-            "stocks": out, "news": news or {}}
+            "stocks": out, "news": news or {},
+            "count": len(out)}
 
 
 # ---------------------------------------------------------------------------
@@ -1045,15 +1165,18 @@ def main() -> int:
 
     if args.mode == "sample":
         news = {sec: synth_news(sec) for sec in SECTION_ORDER}
+        kospi: list[Stock] = []
     else:
         news = {sec: fetch_news(q) for sec, q in SECTION_NEWS_QUERY.items()}
+        print("[info] KOSPI 시총 상위 200종목 수집 중...", file=sys.stderr)
+        kospi = collect_kospi(200)
 
     md = build_markdown(stocks, top3, as_of, args.mode, news)
 
-    # 메인 대시보드 데이터
+    # 메인 대시보드 데이터(AI 정밀 + KOSPI 200 검색)
     LATEST_PATH.parent.mkdir(parents=True, exist_ok=True)
     LATEST_PATH.write_text(
-        json.dumps(build_dashboard(stocks, top3, as_of, news), ensure_ascii=False),
+        json.dumps(build_dashboard(stocks, top3, as_of, news, kospi), ensure_ascii=False),
         encoding="utf-8")
 
     if args.stdout:
