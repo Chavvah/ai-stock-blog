@@ -58,6 +58,7 @@ jobs:
         if: github.event_name != 'push'
         env:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
         run: |
           python scripts/analyze_stock.py \
             --mode "${{ github.event.inputs.mode || 'live' }}" \

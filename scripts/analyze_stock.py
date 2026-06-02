@@ -245,32 +245,92 @@ def _ttm(cur_row: Optional[dict], prior_full_row: Optional[dict],
     return cur + prior_full - prior_q
 
 
-# KRX 시가총액 캐시(StockListing은 전 종목을 한 번에 반환하므로 1회만 호출)
+# KRX 시가총액 캐시(전 종목을 1회만 받아 채운다)
 _KRX_CAP: dict[str, float] = {}
 _KRX_LOADED = False
+_KRX_SRC = ""  # 실제 사용된 출처: "KRX-OpenAPI" | "FDR" | ""
+KRX_OPENAPI_BASE = "http://data-dbg.krx.co.kr/svc/apis/sto"
+
+
+def _recent_basdd(n: int = 8) -> list[str]:
+    """최근 n일의 YYYYMMDD(오늘→과거). 비영업일은 KRX가 빈 데이터를 주므로 순회용."""
+    today = datetime.now(KST).date()
+    return [(today - timedelta(days=i)).strftime("%Y%m%d") for i in range(n)]
+
+
+def _norm_code(raw: str) -> str:
+    """KRX ISU_CD → 6자리 단축코드. ISIN(KR7...) 형태면 단축코드 부분 추출."""
+    s = (raw or "").strip()
+    if len(s) >= 12 and s[:2].isalpha():  # 예: KR7005930003
+        return s[3:9]
+    return s
+
+
+def _load_krx_openapi() -> bool:
+    """공식 KRX OpenAPI(유가증권+코스닥 일별매매정보)로 시가총액 적재."""
+    key = os.environ.get("KRX_API_KEY")
+    if not key:
+        return False
+    import requests
+    ok = False
+    for svc in ("stk_bydd_trd", "ksq_bydd_trd"):  # KOSPI, KOSDAQ
+        for d in _recent_basdd():
+            try:
+                r = requests.get(f"{KRX_OPENAPI_BASE}/{svc}",
+                                 headers={"AUTH_KEY": key}, params={"basDd": d}, timeout=20)
+                if r.status_code != 200:
+                    if r.status_code in (401, 403):  # 키 미인증 → 즉시 폴백
+                        print(f"  [warn] KRX OpenAPI 인증 실패({r.status_code}: "
+                              f"{r.text[:60]}) → FDR 폴백", file=sys.stderr)
+                        return ok
+                    continue
+                rows = r.json().get("OutBlock_1") or []
+                if not rows:
+                    continue  # 비영업일 → 이전 날짜 시도
+                for it in rows:
+                    code = _norm_code(it.get("ISU_CD", ""))
+                    cap = _to_num(it.get("MKTCAP"))
+                    if code and cap:
+                        _KRX_CAP[code] = cap
+                ok = True
+                break  # 이 시장은 적재 완료
+            except Exception as e:  # noqa: BLE001
+                print(f"  [warn] KRX OpenAPI 오류({e})", file=sys.stderr)
+                return ok
+    return ok
+
+
+def _load_krx_fdr() -> bool:
+    """FinanceDataReader(KRX 미러)로 시가총액 적재."""
+    if not os.environ.get("SSL_CERT_FILE"):  # Python 프레임워크 빌드 인증서 보정
+        try:
+            import certifi
+            os.environ["SSL_CERT_FILE"] = certifi.where()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        import FinanceDataReader as fdr
+        df = fdr.StockListing("KRX")
+        col = next((c for c in ("Marcap", "MarCap", "시가총액") if c in df.columns), None)
+        if not col:
+            return False
+        for code, cap in zip(df["Code"], df[col]):
+            _KRX_CAP[str(code)] = float(cap)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"  [warn] FDR 시총 로드 실패({e})", file=sys.stderr)
+        return False
 
 
 def _krx_market_cap(code6: str) -> Optional[float]:
-    """KRX 공식 시가총액(원). FinanceDataReader 사용. 실패 시 None → Yahoo 폴백."""
-    global _KRX_LOADED
+    """KRX 공식 시가총액(원). 공식 OpenAPI 우선 → FDR 폴백 → (없으면 None→Yahoo)."""
+    global _KRX_LOADED, _KRX_SRC
     if not _KRX_LOADED:
         _KRX_LOADED = True
-        # Python 프레임워크 빌드의 SSL 인증서 누락 대비(요청 라이브러리 외 urllib 사용)
-        if not os.environ.get("SSL_CERT_FILE"):
-            try:
-                import certifi
-                os.environ["SSL_CERT_FILE"] = certifi.where()
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            import FinanceDataReader as fdr
-            df = fdr.StockListing("KRX")
-            col = next((c for c in ("Marcap", "MarCap", "시가총액") if c in df.columns), None)
-            if col:
-                for code, cap in zip(df["Code"], df[col]):
-                    _KRX_CAP[str(code)] = float(cap)
-        except Exception as e:  # noqa: BLE001
-            print(f"  [warn] KRX 시총 로드 실패({e}) → Yahoo 폴백", file=sys.stderr)
+        if _load_krx_openapi():
+            _KRX_SRC = "KRX-OpenAPI"
+        elif _load_krx_fdr():
+            _KRX_SRC = "FDR"
     return _KRX_CAP.get(code6)
 
 
