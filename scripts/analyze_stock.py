@@ -111,9 +111,11 @@ class Stock:
     roic: Optional[float] = None  # %
     peg: Optional[float] = None
     # 분석 결과
-    value_score: float = 0.0       # 동종평균 대비 멀티플 할인폭(높을수록 저평가)
+    value_score: float = 0.0       # 동종평균 대비 멀티플 할인폭(섹터 가중)
     quality_bonus: float = 0.0     # ROIC 가점
     growth_bonus: float = 0.0      # PEG<1 가점
+    safety_bonus: float = 0.0      # 안전마진(PBR<1, EV/EBITDA<평균) 가점
+    safety_flags: list[str] = field(default_factory=list)
     composite: float = 0.0
     is_candidate: bool = False     # 1차 후보군 여부
     cheap_flags: list[str] = field(default_factory=list)
@@ -180,6 +182,43 @@ def synth_supply(stock: Stock) -> None:
         indiv.append(-(f + o))
     stock.supply = {"dates": _last_days(n), "foreign": foreign, "organ": organ,
                     "individual": indiv, "foreignHold": f"{30 + seed % 30}.0%"}
+
+
+SECTION_NEWS_QUERY = {
+    "인프라/반도체": "AI 반도체 OR HBM OR 엔비디아 OR 파운드리",
+    "클라우드/데이터센터": "AI 클라우드 OR 데이터센터 OR AWS OR Azure",
+    "모델/소프트웨어": "AI 모델 OR LLM OR 생성형 AI OR 오픈AI",
+    "AI 애플리케이션": "AI 에이전트 OR AI 서비스 OR AI 애플리케이션",
+}
+
+
+def fetch_news(query: str, n: int = 3) -> list[dict]:
+    """구글 뉴스 RSS에서 상위 n건(제목·링크·출처·날짜). 키 불필요."""
+    import requests
+    import xml.etree.ElementTree as ET
+    from urllib.parse import quote
+    try:
+        url = f"https://news.google.com/rss/search?q={quote(query)}&hl=ko&gl=KR&ceid=KR:ko"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        root = ET.fromstring(r.content)
+        out = []
+        for it in root.findall(".//item")[:n]:
+            title = (it.findtext("title") or "").strip()
+            src = (it.findtext("source") or "").strip()
+            if src and title.endswith(" - " + src):
+                title = title[: -(len(src) + 3)].strip()
+            out.append({"title": title, "link": (it.findtext("link") or "").strip(),
+                        "source": src, "date": (it.findtext("pubDate") or "")[:16]})
+        return out
+    except Exception as e:  # noqa: BLE001
+        print(f"  [warn] 뉴스 수집 실패({query[:12]}): {e}", file=sys.stderr)
+        return []
+
+
+def synth_news(section: str) -> list[dict]:
+    """sample 모드용 예시 헤드라인."""
+    return [{"title": f"{section} — 예시 헤드라인 {i}", "link": "#",
+             "source": "예시", "date": ""} for i in (1, 2, 3)]
 
 
 def fetch_supply(stock: Stock) -> None:
@@ -645,40 +684,79 @@ def section_peer_avg(stocks: list[Stock], metric: str) -> Optional[float]:
     return sum(vals) / len(vals)
 
 
+# 섹터 성격 — 하드웨어는 유형자산(공장·장비·데이터센터) 가치가 크고,
+# 소프트웨어/AI 모델은 무형자산이 핵심이라 자본효율·성장성이 더 중요하다.
+HARDWARE_SECTORS = {"인프라/반도체", "클라우드/데이터센터"}
+
+# 섹터별 멀티플 할인 가중치(value_score): 하드웨어는 PBR·EV/EBITDA 중시
+DISC_WEIGHTS = {
+    "hardware": {"per": 0.25, "pbr": 0.40, "ev_ebitda": 0.35},
+    "software": {"per": 0.45, "pbr": 0.10, "ev_ebitda": 0.45},
+}
+# 섹터별 가점 가중치: 소프트웨어는 ROIC(자본수익률)·PEG(성장성) 비중↑
+BONUS_WEIGHTS = {
+    "hardware": {"roic": 0.25, "peg": 0.35},
+    "software": {"roic": 0.55, "peg": 0.70},
+}
+
+
+def sector_profile(section: str) -> str:
+    return "hardware" if section in HARDWARE_SECTORS else "software"
+
+
 def score(stocks: list[Stock]) -> None:
-    """섹션별 동종평균 대비 저평가 점수 + ROIC/PEG 가점."""
+    """투자 해석 가이드를 반영한 섹터 가중 스코어링.
+
+    - value_score: 동종평균 대비 멀티플 할인을 섹터별 가중치로 합산
+      (하드웨어=PBR·EV/EBITDA 중시, 소프트웨어=PER·이익효율 중시)
+    - 가점: ROIC·PEG에 섹터별 가중치 적용(소프트웨어에서 비중↑)
+    - 안전마진(margin of safety): PBR<1 또는 EV/EBITDA<동종평균에 가점
+    """
     by_section: dict[str, list[Stock]] = {}
     for s in stocks:
         by_section.setdefault(s.section, []).append(s)
 
     for section, group in by_section.items():
         peer = {m: section_peer_avg(group, m) for m in VALUATION_METRICS}
+        prof = sector_profile(section)
+        dw, bw = DISC_WEIGHTS[prof], BONUS_WEIGHTS[prof]
         for s in group:
-            discounts, cheaper_count = [], 0
+            num = den = 0.0
+            cheaper_count = 0
             for m in VALUATION_METRICS:
                 v, avg = s.metric(m), peer[m]
                 if v is None or avg is None or v <= 0:
                     continue
                 disc = (avg - v) / avg  # +면 평균보다 쌈
-                discounts.append(disc)
+                num += dw[m] * disc
+                den += dw[m]
                 if disc > 0:
                     cheaper_count += 1
                     s.cheap_flags.append(METRIC_LABEL[m])
-            # 1차 후보군: 멀티플 과반이 동종평균보다 낮음
             s.is_candidate = cheaper_count >= 2
-            s.value_score = (sum(discounts) / len(discounts)) if discounts else -1.0
+            s.value_score = (num / den) if den else -1.0
 
-            # 가점: ROIC(수익성) — 0~40%를 0~1로 정규화
             if s.roic is not None:
                 s.quality_bonus = max(0.0, min(s.roic, 40.0)) / 40.0
-            # 가점: PEG<1(성장성 대비 저평가)
             if s.peg is not None and 0 < s.peg < 1:
-                s.growth_bonus = (1 - s.peg)  # 0~1
+                s.growth_bonus = 1 - s.peg
+
+            # 안전마진
+            safety = 0.0
+            if s.pbr is not None and s.pbr < 1.0:
+                safety += 0.30
+                s.safety_flags.append("PBR<1")
+            if s.ev_ebitda is not None and peer["ev_ebitda"] is not None \
+                    and s.ev_ebitda < peer["ev_ebitda"]:
+                safety += 0.10
+                s.safety_flags.append("EV/EBITDA<동종평균")
+            s.safety_bonus = safety
 
             s.composite = (
-                1.00 * s.value_score
-                + 0.35 * s.quality_bonus
-                + 0.50 * s.growth_bonus
+                s.value_score
+                + bw["roic"] * s.quality_bonus
+                + bw["peg"] * s.growth_bonus
+                + safety
             )
 
 
@@ -723,7 +801,8 @@ def fmt(v: Optional[float], suffix: str = "") -> str:
     return f"{v:g}{suffix}" if v is not None else "—"
 
 
-def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str) -> str:
+def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str,
+                   news: Optional[dict] = None) -> str:
     by_section: dict[str, list[Stock]] = {}
     for s in stocks:
         by_section.setdefault(s.section, []).append(s)
@@ -731,8 +810,6 @@ def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str
         sec: {m: section_peer_avg(g, m) for m in VALUATION_METRICS}
         for sec, g in by_section.items()
     }
-
-    medals = ["🥇", "🥈", "🥉"]
     out: list[str] = []
 
     # --- Front matter (Hugo / YAML) ---
@@ -747,14 +824,14 @@ def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str
     out.append("")
 
     # --- 면책 문구(최상단) ---
-    out.append("> ⚠️ **면책 고지** — 본 리포트는 재무제표 기반의 정량적 분석 자료이며, "
+    out.append("> **면책 고지** — 본 리포트는 재무제표 기반의 정량적 분석 자료이며, "
                "실제 투자 결과에 대한 책임은 투자자 본인에게 있습니다.")
     out.append("")
-    out.append(f"<sub>📊 데이터 기준일: {as_of} · 국내 종목은 DART 공시 최신 분기 보고서 + KRX 시가총액 기준, "
-               f"해외 종목은 Yahoo Finance · 생성 모드: `{mode}`</sub>")
+    out.append(f"데이터 기준일: {as_of} · 국내 종목은 DART 공시 최신 분기 보고서와 KRX 시가총액, "
+               f"해외 종목은 Yahoo Finance · 생성 모드 `{mode}`")
     out.append("")
     # 용어 쉽게 보기 — 클릭하면 모달
-    out.append('<p class="glossary-chips">📖 용어가 어렵나요? 클릭해보세요: '
+    out.append('<p class="glossary-chips">용어 설명(클릭 시 쉬운 풀이): '
                + " ".join(f'<button class="term" data-term="{k}">{lbl}</button>'
                           for k, lbl in [("per", "PER"), ("pbr", "PBR"),
                                          ("ev_ebitda", "EV/EBITDA"), ("roic", "ROIC"),
@@ -763,32 +840,54 @@ def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str
                + "</p>")
     out.append("")
 
-    # --- 오늘의 AI 저평가 Top 3 요약 박스(Table) ---
-    out.append("## 🏆 오늘의 AI 저평가 Top 3")
+    # --- 오늘의 AI 저평가 Top 3 ---
+    out.append("## 오늘의 AI 저평가 Top 3")
     out.append("")
     out.append("| 순위 | 종목 | 섹션 | PER | PBR | EV/EBITDA | ROIC | PEG |")
     out.append("|:---:|:---|:---|---:|---:|---:|---:|---:|")
-    for i, s in enumerate(top3):
+    for i, s in enumerate(top3, 1):
         out.append(
-            f"| {medals[i]} | **{s.name}** ({s.ticker}) | {s.section} | "
+            f"| {i} | **{s.name}** ({s.ticker}) | {s.section} | "
             f"{fmt(s.per)} | {fmt(s.pbr)} | {fmt(s.ev_ebitda)} | "
             f"{fmt(s.roic, '%')} | {fmt(s.peg)} |"
         )
     out.append("")
 
-    # --- Top 3 3줄 분석 ---
-    out.append("### 왜 저평가인가 — 3줄 분석")
+    # --- Top 3 선정 근거 ---
+    out.append("### 선정 근거")
     out.append("")
-    for i, s in enumerate(top3):
-        out.append(f"#### {medals[i]} {s.name} ({s.ticker}) · {s.section}")
+    for i, s in enumerate(top3, 1):
+        lens = "유형자산(PBR·EV/EBITDA) 중심" if sector_profile(s.section) == "hardware" \
+            else "자본효율·성장성(ROIC·PEG) 중심"
+        out.append(f"**{i}. {s.name} ({s.ticker})** · {s.section} — {lens}")
+        out.append("")
         for line in reason_lines(s, peer_by_section[s.section]):
             out.append(f"- {line}")
+        if s.safety_flags:
+            out.append(f"- 안전마진: {', '.join(s.safety_flags)} — 가격 하방을 받쳐주는 신호.")
         out.append("")
 
-    # --- 섹션별 시장 동향 ---
-    out.append("---")
+    # --- 투자 관점: 데이터 해석법 ---
+    out.append("## 투자 관점: 데이터 해석법")
     out.append("")
-    out.append("## 📈 섹션별 시장 동향")
+    out.append("Top 3는 아래 기준으로 선정·검토됩니다. 무조건 오르는 종목은 없으나, "
+               "재무적으로 우량하면서 시장의 주목은 아직 낮은 종목을 찾는 데 최적화되어 있습니다.")
+    out.append("")
+    out.append("- **안전마진** — PBR이 1배 미만이거나 EV/EBITDA가 동종 업계 평균보다 낮으면, "
+               "시장이 그 기업의 AI 잠재력을 아직 가격에 반영하지 않았다는 신호로 보고 가점합니다.")
+    out.append("- **섹터별 지표 가중치** — 섹터 성격에 따라 보는 지표의 비중을 달리합니다.")
+    out.append("")
+    out.append("| 섹터 | 우선 지표 | 이유 |")
+    out.append("|:---|:---|:---|")
+    out.append("| 하드웨어(반도체·인프라·데이터센터) | PBR, EV/EBITDA | 공장·장비 등 유형자산 가치가 크다 |")
+    out.append("| 소프트웨어·AI 모델 | ROIC, PEG | 무형자산이 핵심이라 자본효율·성장성이 중요하다 |")
+    out.append("")
+    out.append("- **활용법** — 매일의 Top 3를 별도 시트에 기록해 두면, 일정 기간 뒤 "
+               "어떤 종목이 먼저 상승 탄력을 받는지 패턴을 확인할 수 있습니다.")
+    out.append("")
+
+    # --- 섹션별 시장 동향 ---
+    out.append("## 섹션별 시장 동향")
     out.append("")
     for sec in SECTION_ORDER:
         group = by_section.get(sec, [])
@@ -819,7 +918,7 @@ def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str
         out.append("| 종목 | PER | PBR | EV/EBITDA | ROIC | PEG | 후보 | 가격 매력 |")
         out.append("|:---|---:|---:|---:|---:|---:|:---:|:---|")
         for s in group_sorted:
-            cand = "✅" if s.is_candidate else "—"
+            cand = "O" if s.is_candidate else "—"
             flags = ", ".join(sorted(set(s.cheap_flags))) if s.cheap_flags else "—"
             out.append(
                 f"| {s.name} ({s.ticker}) | {fmt(s.per)} | {fmt(s.pbr)} | "
@@ -827,19 +926,37 @@ def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str
             )
         out.append("")
 
+    # --- 섹션별 주요 뉴스 ---
+    if news:
+        out.append("## 섹션별 주요 뉴스 Top 3")
+        out.append("")
+        for sec in SECTION_ORDER:
+            items = news.get(sec) or []
+            if not items:
+                continue
+            out.append(f"### {sec}")
+            for it in items[:3]:
+                title = it.get("title", "").replace("|", "ǀ")
+                link = it.get("link", "")
+                meta = " · ".join(x for x in (it.get("source", ""), it.get("date", "")) if x)
+                head = f"[{title}]({link})" if link and link != "#" else title
+                out.append(f"1. {head}" + (f" — {meta}" if meta else ""))
+            out.append("")
+
     # --- 방법론 ---
-    out.append("---")
+    out.append("<details><summary>분석 방법론</summary>")
     out.append("")
-    out.append("<details><summary>📐 분석 방법론</summary>")
+    out.append("1. 4개 섹션 전 종목의 PER·PBR·EV/EBITDA·ROIC·PEG를 수집·계산한다.")
+    out.append("2. 섹션 내 동종업계 평균(이상치 보정 절사평균) 대비 멀티플이 낮은 종목을 "
+               "1차 후보군으로 선정한다(과반 지표가 평균 미만이면 후보 O).")
+    out.append("3. 섹터 성격에 따라 가중치를 달리한다 — 하드웨어는 PBR·EV/EBITDA, "
+               "소프트웨어·AI는 ROIC·PEG의 비중을 높인다.")
+    out.append("4. PBR 1배 미만 또는 EV/EBITDA가 동종평균 미만이면 안전마진 가점을 더한다.")
+    out.append("5. `종합점수 = 섹터가중 멀티플 할인 + ROIC 가점 + PEG 가점 + 안전마진` "
+               "상위 3종목을 Top 3로 선정한다.")
     out.append("")
-    out.append("1. 4개 섹션(인프라/반도체, 클라우드/데이터센터, 모델/소프트웨어, AI 애플리케이션) 전 종목의 "
-               "**PER·PBR·EV/EBITDA·ROIC·PEG**를 수집·계산.")
-    out.append("2. 섹션 내 **동종업계 평균(이상치 보정 절사평균)** 대비 멀티플(PER·PBR·EV/EBITDA)이 낮은 종목을 "
-               "1차 후보군으로 선정 (과반 지표가 평균 미만일 때 ✅).")
-    out.append("3. **ROIC가 높고(수익성 우수), PEG가 1 미만(성장 대비 저평가)** 인 종목에 가점.")
-    out.append("4. `종합점수 = 멀티플 할인폭 + 0.35·ROIC가점 + 0.50·PEG가점` 상위 3종목을 Top 3로 선정.")
-    out.append("")
-    out.append("> 국내 종목은 DART 공시 최신 분기 보고서(펀더멘털) + KRX 시가총액을 적용하며, 해외 종목은 Yahoo Finance를 사용합니다.")
+    out.append("국내 종목은 DART 공시 최신 분기 보고서(펀더멘털)와 KRX 시가총액을 적용하며, "
+               "해외 종목은 Yahoo Finance를 사용한다.")
     out.append("</details>")
     out.append("")
 
@@ -892,7 +1009,12 @@ def main() -> int:
             if len(top3) == 3:
                 break
 
-    md = build_markdown(stocks, top3, as_of, args.mode)
+    if args.mode == "sample":
+        news = {sec: synth_news(sec) for sec in SECTION_ORDER}
+    else:
+        news = {sec: fetch_news(q) for sec, q in SECTION_NEWS_QUERY.items()}
+
+    md = build_markdown(stocks, top3, as_of, args.mode, news)
 
     if args.stdout:
         print(md)
