@@ -14,15 +14,17 @@
 
 데이터 소스: 국내 종목은 **DART 공시 최신 분기 보고서**, 해외 종목은 **Yahoo Finance**.
 
-## 디렉터리 구조
+## 디렉터리 구조 (Hugo)
 
 ```
 ai-stock-blog/
 ├─ scripts/analyze_stock.py      # 핵심 분석 로직 + 리포트 생성
 ├─ data/sample_data.json         # 오프라인/예시용 표본 데이터
-├─ _posts/                       # 생성된 일일 리포트 (YYYY-MM-DD-daily-ai-top3.md)
-├─ .github/workflows/daily-report.yml  # 매일 07:00 KST 자동화
-├─ _config.yml · index.md · Gemfile    # Jekyll
+├─ content/posts/                # 생성된 일일 리포트 (YYYY-MM-DD-daily-ai-top3.md)
+├─ layouts/                      # 자체 Hugo 레이아웃(외부 테마 미사용)
+├─ static/css/style.css          # 스타일
+├─ hugo.toml                     # Hugo 설정
+├─ .github/workflows/deploy.yml  # 매일 07:00 KST 생성 + Hugo 빌드 + Pages 배포
 └─ requirements.txt
 ```
 
@@ -45,16 +47,17 @@ python scripts/analyze_stock.py --mode sample --stdout | less
 
 ## 자동화
 
-- `.github/workflows/daily-report.yml`이 매일 **22:00 UTC(= 07:00 KST)** 실행됩니다.
+- `.github/workflows/deploy.yml`이 매일 **22:00 UTC(= 07:00 KST)** 실행됩니다.
+  리포트 생성 → `content/posts/`에 커밋 → Hugo 빌드 → GitHub Pages 배포.
 - 저장소 **Settings → Secrets → Actions**에 `DART_API_KEY`를 등록하세요.
   (미등록 시 국내 종목은 Yahoo Finance로 자동 폴백합니다.)
-- 결과는 `_posts/<날짜>-daily-ai-top3.md`로 커밋·푸시됩니다.
+- **Settings → Pages → Source**를 반드시 **GitHub Actions**로 설정하세요(브랜치 배포 아님).
 
 ## 로컬 미리보기
 
 ```bash
-bundle install
-bundle exec jekyll serve   # http://localhost:4000
+hugo server -D     # http://localhost:1313/ai-stock-blog/
+hugo --minify      # public/ 로 정적 빌드
 ```
 
 ## 분석 유니버스 수정

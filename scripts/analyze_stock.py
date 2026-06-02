@@ -31,7 +31,7 @@ from typing import Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_PATH = ROOT / "data" / "sample_data.json"
-POSTS_DIR = ROOT / "_posts"
+POSTS_DIR = ROOT / "content" / "posts"   # Hugo 콘텐츠 디렉터리
 KST = timezone(timedelta(hours=9))
 
 SECTION_ORDER = [
@@ -492,13 +492,14 @@ def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str
     medals = ["🥇", "🥈", "🥉"]
     out: list[str] = []
 
-    # --- Front matter ---
+    # --- Front matter (Hugo / YAML) ---
+    tags = [t.name for t in top3] + ["저평가", "밸류에이션"]
     out.append("---")
-    out.append("layout: post")
     out.append(f'title: "[{as_of}] 오늘의 AI 저평가 Top 3"')
-    out.append(f"date: {as_of} 07:00:00 +0900")
-    out.append("categories: [AI투자, 데일리리포트]")
-    out.append(f"tags: [{', '.join(t.name for t in top3)}, 저평가, 밸류에이션]")
+    out.append(f"date: {as_of}T07:00:00+09:00")
+    out.append("draft: false")
+    out.append("categories: [\"AI투자\", \"데일리리포트\"]")
+    out.append(f"tags: [{', '.join(json.dumps(t, ensure_ascii=False) for t in tags)}]")
     out.append("---")
     out.append("")
 

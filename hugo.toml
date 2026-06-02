@@ -1,0 +1,24 @@
+baseURL = "https://projectyoon.github.io/ai-stock-blog/"
+defaultContentLanguage = "ko"
+title = "AI 섹터 저평가 종목 탐색기"
+timeZone = "Asia/Seoul"
+enableRobotsTXT = true
+# 외부 테마 없이 자체 layouts/ 사용
+
+[pagination]
+  pagerSize = 10
+
+[params]
+  description = "매일 07:00 KST, 4개 AI 섹션의 시장 동향과 '가치 대비 저평가된 AI 종목 Top 3'를 정량 분석으로 선별합니다."
+  dateFormat = "2006-01-02"
+
+[markup.goldmark.renderer]
+  unsafe = true   # 리포트 내 HTML(요약 박스, details) 허용
+
+[markup.tableOfContents]
+  startLevel = 2
+  endLevel = 3
+
+[taxonomies]
+  tag = "tags"
+  category = "categories"

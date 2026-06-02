@@ -1,0 +1,107 @@
+name: Build & Deploy (Hugo)
+
+on:
+  # 매일 07:00 KST = 22:00 UTC(전일): 리포트 생성 후 배포
+  schedule:
+    - cron: "0 22 * * *"
+  # 코드/콘텐츠 push 시 재배포
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "분석 모드 (live: 실데이터 / sample: 표본)"
+        required: false
+        default: "live"
+        type: choice
+        options: [live, sample]
+
+# Node.js 20 액션 deprecation 대응
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  HUGO_VERSION: "0.162.1"
+
+permissions:
+  contents: write   # 생성된 리포트 커밋
+  pages: write      # Pages 배포
+  id-token: write   # Pages 배포 인증
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- 리포트 생성: 스케줄/수동 실행 시에만 ---
+      - name: Set up Python
+        if: github.event_name != 'push'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python deps
+        if: github.event_name != 'push'
+        run: pip install -r requirements.txt
+
+      - name: Compute report date (KST)
+        if: github.event_name != 'push'
+        id: d
+        run: echo "date=$(TZ=Asia/Seoul date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate report
+        if: github.event_name != 'push'
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          python scripts/analyze_stock.py \
+            --mode "${{ github.event.inputs.mode || 'live' }}" \
+            --date "${{ steps.d.outputs.date }}"
+
+      - name: Commit new report
+        if: github.event_name != 'push'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "content/posts/${{ steps.d.outputs.date }}-daily-ai-top3.md"
+          if git diff --staged --quiet; then
+            echo "변경 사항 없음 — 커밋 생략"
+          else
+            git commit -m "report: ${{ steps.d.outputs.date }} 오늘의 AI 저평가 Top 3"
+            git push
+          fi
+
+      # --- Hugo 빌드 (공식 .deb 직접 설치 — 서드파티 액션 미사용) ---
+      - name: Install Hugo
+        run: |
+          wget -q -O hugo.deb \
+            "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.deb"
+          sudo dpkg -i hugo.deb
+          hugo version
+
+      - name: Build site
+        run: hugo --minify --gc
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

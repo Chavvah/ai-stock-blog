@@ -1,0 +1,56 @@
+:root {
+  --fg: #1f2328;
+  --muted: #6b7280;
+  --accent: #2563eb;
+  --border: #e5e7eb;
+  --bg-soft: #f8fafc;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard",
+               "Noto Sans KR", Segoe UI, Roboto, sans-serif;
+  color: var(--fg);
+  line-height: 1.7;
+  background: #fff;
+}
+.container { max-width: 880px; margin: 0 auto; padding: 0 20px 64px; }
+.site-header {
+  max-width: 880px; margin: 0 auto; padding: 32px 20px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.site-title { font-size: 1.5rem; font-weight: 800; text-decoration: none; color: var(--fg); }
+.site-tagline { color: #6b7280; font-size: .92rem; margin: 6px 0 0; }
+.intro { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 12px;
+         padding: 16px 20px; margin: 28px 0; }
+h1, h2, h3, h4 { line-height: 1.3; }
+.post-list { list-style: none; padding: 0; }
+.post-list li { display: flex; gap: 14px; align-items: baseline; padding: 10px 0;
+                border-bottom: 1px dashed var(--border); }
+.post-list time { color: #9ca3af; font-variant-numeric: tabular-nums; font-size: .85rem; white-space: nowrap; }
+.post-list a { color: var(--accent); text-decoration: none; font-weight: 600; }
+.post-list a:hover { text-decoration: underline; }
+.post-title { margin-bottom: 6px; }
+.post-meta { color: #9ca3af; font-size: .88rem; margin-bottom: 24px; }
+.tag { color: #6b7280; }
+a { color: var(--accent); }
+
+/* 표 */
+table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: .92rem; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: right; white-space: nowrap; }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+thead th { background: var(--bg-soft); }
+tbody tr:nth-child(even) { background: #fcfcfd; }
+
+/* 인용/면책 */
+blockquote { border-left: 4px solid #f59e0b; background: #fffbeb; margin: 18px 0;
+             padding: 10px 16px; border-radius: 0 8px 8px 0; }
+blockquote p { margin: 6px 0; }
+code { background: var(--bg-soft); padding: 1px 5px; border-radius: 4px; font-size: .88em; }
+details { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;
+          padding: 10px 16px; margin: 20px 0; }
+summary { cursor: pointer; font-weight: 600; }
+hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+.site-footer { border-top: 1px solid var(--border); color: #9ca3af; font-size: .82rem;
+               max-width: 880px; margin: 0 auto; padding: 24px 20px 48px; }
+.back { margin-top: 32px; }

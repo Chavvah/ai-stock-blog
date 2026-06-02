@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Lang | default "ko" }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ if .IsHome }}{{ .Site.Title }}{{ else }}{{ .Title }} · {{ .Site.Title }}{{ end }}</title>
+  <meta name="description" content="{{ .Description | default .Site.Params.description }}">
+  <link rel="stylesheet" href="{{ "css/style.css" | relURL }}">
+</head>
+<body>
+  <header class="site-header">
+    <a class="site-title" href="{{ "/" | relURL }}">📊 {{ .Site.Title }}</a>
+    <p class="site-tagline">{{ .Site.Params.description }}</p>
+  </header>
+  <main class="container">
+    {{ block "main" . }}{{ end }}
+  </main>
+  <footer class="site-footer">
+    <p>본 사이트의 모든 리포트는 재무제표 기반의 정량적 분석 자료이며, 실제 투자 결과에 대한 책임은 투자자 본인에게 있습니다.</p>
+    <p>© {{ now.Year }} {{ .Site.Title }} · Hugo</p>
+  </footer>
+</body>
+</html>
