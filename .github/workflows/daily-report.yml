@@ -16,6 +16,10 @@ on:
 permissions:
   contents: write
 
+# Node.js 20 액션 deprecation 대응 — 런타임을 Node.js 24로 강제
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 concurrency:
   group: daily-report
   cancel-in-progress: false

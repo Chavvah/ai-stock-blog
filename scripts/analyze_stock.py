@@ -159,26 +159,168 @@ def fetch_yahoo(name: str, ticker: str, section: str) -> Stock:
     )
 
 
-def fetch_dart(name: str, ticker: str, section: str, corp_code: str) -> Stock:
-    """DART 공시 최신 분기 보고서 기반 펀더멘털 + 시장가로 멀티플 산출.
+# --- OpenDART 상수 -----------------------------------------------------------
+DART_BASE = "https://opendart.fss.or.kr/api"
+KR_TAX_RATE = 0.22  # 법인세 실효세율 근사(ROIC NOPAT 계산용)
+# 분기 보고서 코드: 최신 분기 우선 탐색(3분기 → 반기 → 1분기), 연간은 TTM 보정용
+REPRT_QUARTERLY = ["11014", "11012", "11013"]
+REPRT_ANNUAL = "11011"
 
-    실데이터 수집은 OpenDART 재무제표 API(fnlttSinglAcntAll)와 시세가 필요하다.
-    환경변수 DART_API_KEY 사용. 네트워크/키 부재 시 yahoo 폴백.
+
+def _to_num(v) -> Optional[float]:
+    try:
+        return float(str(v).replace(",", "").strip())
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _dart_statements(api_key: str, corp_code: str, year: int, reprt_code: str) -> list[dict]:
+    """fnlttSinglAcntAll(전체 재무제표) 호출. 연결(CFS) 우선, 없으면 별도(OFS).
+
+    반환: [{sj, nm, th(당기누계), fr(전년동기누계)}]. 실패 시 [].
     """
+    import requests  # 지연 임포트
+
+    for fs_div in ("CFS", "OFS"):
+        try:
+            resp = requests.get(
+                f"{DART_BASE}/fnlttSinglAcntAll.json",
+                params={
+                    "crtfc_key": api_key, "corp_code": corp_code,
+                    "bsns_year": str(year), "reprt_code": reprt_code, "fs_div": fs_div,
+                },
+                timeout=20,
+            )
+            data = resp.json()
+            if data.get("status") != "000":
+                continue
+            rows = [
+                {
+                    "sj": it.get("sj_div"),
+                    "nm": (it.get("account_nm") or "").replace(" ", ""),
+                    "th": _to_num(it.get("thstrm_amount")),
+                    "fr": _to_num(it.get("frmtrm_amount")),
+                }
+                for it in data.get("list", [])
+            ]
+            if rows:
+                return rows
+        except Exception:  # noqa: BLE001 — 네트워크/JSON 오류는 폴백 처리
+            continue
+    return []
+
+
+def _pick(rows: list[dict], sj: str, *keywords: str) -> Optional[dict]:
+    for r in rows:
+        if r["sj"] == sj and any(k in r["nm"] for k in keywords):
+            return r
+    return None
+
+
+def _ttm(cur: Optional[dict], prior_annual: Optional[dict]) -> Optional[float]:
+    """TTM = 전년연간 - 전년동기누계 + 당기누계. 보정 불가 시 당기누계 그대로."""
+    if not cur or cur["th"] is None:
+        return None
+    cur_ytd, prior_ytd = cur["th"], cur["fr"]
+    pa = prior_annual["th"] if prior_annual else None
+    if pa is not None and prior_ytd is not None:
+        return pa - prior_ytd + cur_ytd
+    return cur_ytd
+
+
+def fetch_dart(name: str, ticker: str, section: str, corp_code: str = "") -> Stock:
+    """DART 공시 최신 분기 보고서 기반 펀더멘털 + Yahoo 시장가로 멀티플 산출.
+
+    - 손익 항목(당기순이익·영업이익·감가상각비)은 TTM(최근 4분기)으로 환산
+    - 재무상태 항목(자본총계·부채총계·현금)은 분기말 시점값 사용
+    - 시가총액은 Yahoo(.KS 시세)에서 취득
+    환경변수 DART_API_KEY 또는 corp_code 부재 시 Yahoo 폴백.
+    """
+    base = fetch_yahoo(name, ticker, section)  # 시장가 + 결측 폴백용
     api_key = os.environ.get("DART_API_KEY")
-    if not api_key:
-        # 키가 없으면 Yahoo가 .KS 티커도 커버하므로 폴백
-        s = fetch_yahoo(name, ticker, section)
-        s.source = "dart(폴백:yahoo)"
-        return s
-    # NOTE: 실제 구현에서는 아래에서 OpenDART fnlttSinglAcntAll 로
-    #       당기순이익/자본총계/영업이익/EBITDA/투하자본을 받아
-    #       시가총액과 결합해 PER/PBR/EV-EBITDA/ROIC/PEG 를 계산한다.
-    #       (분기 보고서 reprt_code=11013/11012/11014 우선 적용)
-    #       데모 환경에서는 yahoo 폴백으로 동작을 보장한다.
-    s = fetch_yahoo(name, ticker, section)
-    s.source = "dart"
-    return s
+    if not api_key or not corp_code:
+        base.source = "dart(폴백:yahoo)"
+        return base
+
+    # 시가총액(원) — DART는 시세를 제공하지 않으므로 Yahoo raw 값 사용
+    try:
+        import yfinance as yf
+        mcap = yf.Ticker(ticker).info.get("marketCap")
+    except Exception:  # noqa: BLE001
+        mcap = None
+
+    # 최신 분기 보고서 탐색: 올해 → 작년, 3Q → 반기 → 1Q
+    cur_year = int(datetime.now(KST).strftime("%Y"))
+    rows, used_year = [], None
+    for y in (cur_year, cur_year - 1):
+        for rc in REPRT_QUARTERLY:
+            rows = _dart_statements(api_key, corp_code, y, rc)
+            if rows:
+                used_year = y
+                break
+        if rows:
+            break
+    if not rows:
+        base.source = "dart(폴백:yahoo)"
+        return base
+
+    # 재무상태(시점값)
+    equity = _pick(rows, "BS", "자본총계")
+    liab = _pick(rows, "BS", "부채총계")
+    cash = _pick(rows, "BS", "현금및현금성자산", "현금과현금성자산")
+    total_equity = equity["th"] if equity else None
+    total_liab = liab["th"] if liab else None
+    cash_amt = (cash["th"] if cash and cash["th"] is not None else 0.0)
+
+    # 손익/현금흐름(TTM 환산: 전년 연간 보고서로 보정)
+    prior_annual = _dart_statements(api_key, corp_code, used_year - 1, REPRT_ANNUAL)
+    ni_row = _pick(rows, "IS", "당기순이익") or _pick(rows, "CIS", "당기순이익")
+    op_row = _pick(rows, "IS", "영업이익") or _pick(rows, "CIS", "영업이익")
+    dep_row = _pick(rows, "CF", "감가상각비")
+    amort_row = _pick(rows, "CF", "무형자산상각")
+    ni_ttm = _ttm(ni_row, _pick(prior_annual, "IS", "당기순이익") or _pick(prior_annual, "CIS", "당기순이익"))
+    op_ttm = _ttm(op_row, _pick(prior_annual, "IS", "영업이익") or _pick(prior_annual, "CIS", "영업이익"))
+    dep_ttm = _ttm(dep_row, _pick(prior_annual, "CF", "감가상각비")) or 0.0
+    amort_ttm = _ttm(amort_row, _pick(prior_annual, "CF", "무형자산상각")) or 0.0
+
+    # 이익성장률(YoY 누계 기준) → PEG용
+    ni_growth = None
+    if ni_row and ni_row["fr"] and ni_row["fr"] > 0 and ni_row["th"] is not None:
+        ni_growth = (ni_row["th"] / ni_row["fr"] - 1) * 100
+
+    # --- 멀티플 산출 ---
+    per = (mcap / ni_ttm) if (mcap and ni_ttm and ni_ttm > 0) else None
+    pbr = (mcap / total_equity) if (mcap and total_equity and total_equity > 0) else None
+    ev_ebitda = None
+    if op_ttm is not None:
+        ebitda = op_ttm + dep_ttm + amort_ttm
+        if mcap and ebitda and ebitda > 0 and total_liab is not None:
+            ev = mcap + total_liab - cash_amt
+            ev_ebitda = ev / ebitda
+    roic = None
+    if op_ttm is not None and total_equity and total_liab is not None:
+        invested = total_equity + total_liab - cash_amt
+        if invested > 0:
+            roic = op_ttm * (1 - KR_TAX_RATE) / invested * 100
+    peg = (per / ni_growth) if (per and ni_growth and ni_growth > 0) else None
+
+    # DART 산출값으로 덮어쓰고, 결측은 Yahoo 폴백 유지
+    if per is not None:
+        base.per = round(per, 3)
+    if pbr is not None:
+        base.pbr = round(pbr, 3)
+    if ev_ebitda is not None:
+        base.ev_ebitda = round(ev_ebitda, 3)
+    if roic is not None:
+        base.roic = round(roic, 3)
+    if peg is not None:
+        base.peg = round(peg, 3)
+    if mcap:
+        base.market_cap = round(mcap / 1e12, 1)  # 조 원
+    base.currency = "KRW"
+    # 핵심 항목(자본/순이익)이 DART에서 왔으면 정식 dart 출처로 표기
+    base.source = "dart" if (total_equity is not None and ni_ttm is not None) else "dart(부분:yahoo)"
+    return base
 
 
 def _clean(v) -> Optional[float]:
@@ -212,8 +354,20 @@ def collect_live() -> tuple[list[Stock], str]:
 # 저평가 필터링 / 스코어링
 # ---------------------------------------------------------------------------
 def section_peer_avg(stocks: list[Stock], metric: str) -> Optional[float]:
-    vals = [s.metric(metric) for s in stocks if s.metric(metric) is not None and s.metric(metric) > 0]
-    return sum(vals) / len(vals) if vals else None
+    """동종업계 절사평균(trimmed mean).
+
+    양수 표본만 사용하고, 표본이 5개 이상이면 최댓값·최솟값 1개씩 제거해
+    이상치(예: 비정상적으로 높은 PBR)가 섹션 평균을 왜곡하지 않도록 한다.
+    """
+    vals = sorted(
+        v for s in stocks
+        if (v := s.metric(metric)) is not None and v > 0
+    )
+    if not vals:
+        return None
+    if len(vals) >= 5:
+        vals = vals[1:-1]
+    return sum(vals) / len(vals)
 
 
 def score(stocks: list[Stock]) -> None:
@@ -395,8 +549,8 @@ def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str
     out.append("")
     out.append("1. 4개 섹션(인프라/반도체, 클라우드/데이터센터, 모델/소프트웨어, AI 애플리케이션) 전 종목의 "
                "**PER·PBR·EV/EBITDA·ROIC·PEG**를 수집·계산.")
-    out.append("2. 섹션 내 **동종업계 평균** 대비 멀티플(PER·PBR·EV/EBITDA)이 낮은 종목을 1차 후보군으로 선정 "
-               "(과반 지표가 평균 미만일 때 ✅).")
+    out.append("2. 섹션 내 **동종업계 평균(이상치 보정 절사평균)** 대비 멀티플(PER·PBR·EV/EBITDA)이 낮은 종목을 "
+               "1차 후보군으로 선정 (과반 지표가 평균 미만일 때 ✅).")
     out.append("3. **ROIC가 높고(수익성 우수), PEG가 1 미만(성장 대비 저평가)** 인 종목에 가점.")
     out.append("4. `종합점수 = 멀티플 할인폭 + 0.35·ROIC가점 + 0.50·PEG가점` 상위 3종목을 Top 3로 선정.")
     out.append("")
