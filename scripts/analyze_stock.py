@@ -117,6 +117,7 @@ class Stock:
     composite: float = 0.0
     is_candidate: bool = False     # 1차 후보군 여부
     cheap_flags: list[str] = field(default_factory=list)
+    history: Optional[dict] = None  # {"dates": [...], "closes": [...]} 최근 3년 월봉
 
     def metric(self, key: str) -> Optional[float]:
         return getattr(self, key)
@@ -125,17 +126,72 @@ class Stock:
 # ---------------------------------------------------------------------------
 # 데이터 수집
 # ---------------------------------------------------------------------------
+def _last_months(n: int) -> list[str]:
+    """현재 월부터 거꾸로 n개월의 'YYYY-MM' 레이블(과거→현재 순)."""
+    d = datetime.now(KST).date().replace(day=1)
+    y, m, out = d.year, d.month, []
+    for _ in range(n):
+        out.append(f"{y:04d}-{m:02d}")
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    return list(reversed(out))
+
+
+def synth_history(stock: Stock) -> None:
+    """sample 모드용 결정론적(가짜) 3년 월봉 — 예시 차트 시연용."""
+    import math
+    seed = sum(ord(c) for c in stock.name)
+    n = 36
+    level = 40 + seed % 60
+    closes = []
+    for i in range(n):
+        trend = level * (1 + 0.012 * i)
+        wave = level * 0.08 * math.sin(((i + seed) % 12) / 12 * 2 * math.pi)
+        closes.append(round(trend + wave, 2))
+    stock.history = {"dates": _last_months(n), "closes": closes}
+
+
+def fetch_history(stock: Stock) -> None:
+    """최근 3년 월말 종가 → stock.history. 국내=FDR(KRX), 해외=Yahoo."""
+    try:
+        is_kr = stock.ticker.endswith((".KS", ".KQ"))
+        if is_kr:
+            if not os.environ.get("SSL_CERT_FILE"):
+                try:
+                    import certifi
+                    os.environ["SSL_CERT_FILE"] = certifi.where()
+                except Exception:  # noqa: BLE001
+                    pass
+            import FinanceDataReader as fdr
+            start = (datetime.now(KST).date() - timedelta(days=365 * 3 + 15)).strftime("%Y-%m-%d")
+            df = fdr.DataReader(stock.ticker.split(".")[0], start)
+            s = df["Close"].resample("ME").last().dropna()
+        else:
+            import yfinance as yf
+            h = yf.Ticker(stock.ticker).history(period="3y", interval="1mo")
+            s = h["Close"].dropna()
+        dates = [d.strftime("%Y-%m") for d in s.index]
+        closes = [round(float(x), 2) for x in s.values]
+        if len(closes) >= 6:
+            stock.history = {"dates": dates[-37:], "closes": closes[-37:]}
+    except Exception as e:  # noqa: BLE001
+        print(f"  [warn] {stock.name} 차트 수집 실패: {e}", file=sys.stderr)
+
+
 def load_sample() -> tuple[list[Stock], str]:
     raw = json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))
     stocks: list[Stock] = []
     for section, rows in raw["sections"].items():
         for r in rows:
-            stocks.append(Stock(
+            s = Stock(
                 name=r["name"], ticker=r["ticker"], source=r["source"],
                 section=section, currency=r.get("currency", ""),
                 market_cap=r.get("market_cap"), per=r.get("per"), pbr=r.get("pbr"),
                 ev_ebitda=r.get("ev_ebitda"), roic=r.get("roic"), peg=r.get("peg"),
-            ))
+            )
+            synth_history(s)
+            stocks.append(s)
     return stocks, raw.get("as_of", "")
 
 
@@ -453,6 +509,7 @@ def collect_live() -> tuple[list[Stock], str]:
                     s = fetch_dart(r["name"], r["ticker"], section, r.get("corp_code", ""))
                 else:
                     s = fetch_yahoo(r["name"], r["ticker"], section)
+                fetch_history(s)  # 최근 3년 월봉
                 stocks.append(s)
             except Exception as e:  # noqa: BLE001 — 종목 1건 실패가 전체를 막지 않도록
                 print(f"  [warn] {r['name']}({r['ticker']}) 수집 실패: {e}", file=sys.stderr)
@@ -606,6 +663,14 @@ def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str
     out.append(f"<sub>📊 데이터 기준일: {as_of} · 국내 종목은 DART 공시 최신 분기 보고서 + KRX 시가총액 기준, "
                f"해외 종목은 Yahoo Finance · 생성 모드: `{mode}`</sub>")
     out.append("")
+    # 용어 쉽게 보기 — 클릭하면 모달
+    out.append('<p class="glossary-chips">📖 용어가 어렵나요? 클릭해보세요: '
+               + " ".join(f'<button class="term" data-term="{k}">{lbl}</button>'
+                          for k, lbl in [("per", "PER"), ("pbr", "PBR"),
+                                         ("ev_ebitda", "EV/EBITDA"), ("roic", "ROIC"),
+                                         ("peg", "PEG"), ("mktcap", "시가총액")])
+               + "</p>")
+    out.append("")
 
     # --- 오늘의 AI 저평가 Top 3 요약 박스(Table) ---
     out.append("## 🏆 오늘의 AI 저평가 Top 3")
@@ -685,6 +750,17 @@ def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str
     out.append("")
     out.append("> 국내 종목은 DART 공시 최신 분기 보고서(펀더멘털) + KRX 시가총액을 적용하며, 해외 종목은 Yahoo Finance를 사용합니다.")
     out.append("</details>")
+    out.append("")
+
+    # --- 차트 데이터(레이아웃의 차트 위젯이 읽음) ---
+    chart_payload = {
+        s.name: {"ticker": s.ticker, "section": s.section,
+                 "dates": s.history["dates"], "closes": s.history["closes"]}
+        for s in stocks if s.history
+    }
+    out.append('<script id="chart-data" type="application/json">')
+    out.append(json.dumps(chart_payload, ensure_ascii=False))
+    out.append("</script>")
     out.append("")
     return "\n".join(out)
 
