@@ -304,17 +304,17 @@ def fetch_dart(name: str, ticker: str, section: str, corp_code: str = "") -> Sto
             roic = op_ttm * (1 - KR_TAX_RATE) / invested * 100
     peg = (per / ni_growth) if (per and ni_growth and ni_growth > 0) else None
 
-    # DART 산출값으로 덮어쓰고, 결측은 Yahoo 폴백 유지
-    if per is not None:
-        base.per = round(per, 3)
-    if pbr is not None:
-        base.pbr = round(pbr, 3)
-    if ev_ebitda is not None:
-        base.ev_ebitda = round(ev_ebitda, 3)
-    if roic is not None:
-        base.roic = round(roic, 3)
-    if peg is not None:
-        base.peg = round(peg, 3)
+    # DART 산출값으로 덮어쓰되, 원시 재무제표 파생값의 비현실적 이상치는
+    # Yahoo 값을 유지(폴백)한다. 범위를 벗어나면 통계 신뢰도가 낮다고 판단.
+    def put(field: str, val: Optional[float], lo: float, hi: float) -> None:
+        if val is not None and lo < val < hi:
+            setattr(base, field, round(val, 3))
+
+    put("per", per, 0, 300)
+    put("pbr", pbr, 0, 30)
+    put("ev_ebitda", ev_ebitda, 0, 40)   # 부채/감가상각 근사 오차가 큰 구간 차단
+    put("roic", roic, -60, 90)
+    put("peg", peg, 0, 5)                 # 단일분기 YoY 급변치 차단
     if mcap:
         base.market_cap = round(mcap / 1e12, 1)  # 조 원
     base.currency = "KRW"
