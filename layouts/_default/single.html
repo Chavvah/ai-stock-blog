@@ -13,6 +13,14 @@
     </label>
     <div class="chart-box"><canvas id="price-chart"></canvas></div>
     <p class="chart-note">월말 종가 기준 · 국내 KRX · 해외 Yahoo Finance</p>
+
+    <div id="supply-wrap">
+      <h3>👥 수급 현황 <small id="supply-hold"></small></h3>
+      <div class="chart-box chart-box-sm"><canvas id="supply-chart"></canvas></div>
+      <p class="chart-note">최근 10거래일 투자자별 순매수(주) · 출처 네이버 금융 ·
+        <button class="term" data-term="supply">수급이 뭐예요?</button></p>
+    </div>
+    <p id="supply-none" class="chart-note" hidden>해외 종목은 투자자별 수급 데이터를 제공하지 않습니다.</p>
   </section>
 
   <div class="post-content">
@@ -39,7 +47,7 @@
     sel.appendChild(o);
   });
 
-  var chart;
+  var chart, supplyChart;
   function draw(name) {
     var d = data[name];
     if (chart) chart.destroy();
@@ -58,7 +66,37 @@
           y: { ticks: { callback: function (v) { return v.toLocaleString(); } } } }
       }
     });
+    drawSupply(d.supply);
   }
+
+  function drawSupply(s) {
+    var wrap = document.getElementById("supply-wrap");
+    var none = document.getElementById("supply-none");
+    if (supplyChart) { supplyChart.destroy(); supplyChart = null; }
+    if (!s) { wrap.style.display = "none"; none.hidden = false; return; }
+    wrap.style.display = "block"; none.hidden = true;
+    document.getElementById("supply-hold").textContent =
+      s.foreignHold ? "(외국인 보유 " + s.foreignHold + ")" : "";
+    var mk = function (label, arr, color) {
+      return { label: label, data: arr, backgroundColor: color };
+    };
+    supplyChart = new Chart(document.getElementById("supply-chart"), {
+      type: "bar",
+      data: { labels: s.dates, datasets: [
+        mk("외국인", s.foreign, "#2563eb"),
+        mk("기관", s.organ, "#16a34a"),
+        mk("개인", s.individual, "#f59e0b")
+      ]},
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: "top" },
+          tooltip: { callbacks: { label: function (c) {
+            return c.dataset.label + ": " + c.parsed.y.toLocaleString() + "주"; } } } },
+        scales: { y: { ticks: { callback: function (v) { return v.toLocaleString(); } } } }
+      }
+    });
+  }
+
   sel.addEventListener("change", function () { draw(sel.value); });
   draw(names[0]);
 })();

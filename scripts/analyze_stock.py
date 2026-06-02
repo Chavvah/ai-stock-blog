@@ -118,6 +118,7 @@ class Stock:
     is_candidate: bool = False     # 1차 후보군 여부
     cheap_flags: list[str] = field(default_factory=list)
     history: Optional[dict] = None  # {"dates": [...], "closes": [...]} 최근 3년 월봉
+    supply: Optional[dict] = None   # 수급: {dates, foreign, organ, individual, foreignHold} 최근 10일
 
     def metric(self, key: str) -> Optional[float]:
         return getattr(self, key)
@@ -138,6 +139,16 @@ def _last_months(n: int) -> list[str]:
     return list(reversed(out))
 
 
+def _last_days(n: int) -> list[str]:
+    """현재부터 거꾸로 n일의 'MM-DD' 레이블(과거→현재 순)."""
+    d = datetime.now(KST).date()
+    return list(reversed([(d - timedelta(days=i)).strftime("%m-%d") for i in range(n)]))
+
+
+def _is_kr(ticker: str) -> bool:
+    return ticker.endswith((".KS", ".KQ"))
+
+
 def synth_history(stock: Stock) -> None:
     """sample 모드용 결정론적(가짜) 3년 월봉 — 예시 차트 시연용."""
     import math
@@ -150,6 +161,52 @@ def synth_history(stock: Stock) -> None:
         wave = level * 0.08 * math.sin(((i + seed) % 12) / 12 * 2 * math.pi)
         closes.append(round(trend + wave, 2))
     stock.history = {"dates": _last_months(n), "closes": closes}
+
+
+def synth_supply(stock: Stock) -> None:
+    """sample 모드용 결정론적(가짜) 수급(국내 종목만) — 예시 시연용."""
+    if not _is_kr(stock.ticker):
+        return
+    import math
+    seed = sum(ord(c) for c in stock.name)
+    n = 10
+    foreign, organ, indiv = [], [], []
+    for i in range(n):
+        f = int(1000 * (1 + seed % 5) * math.sin(((i + seed) % 7) / 7 * 2 * math.pi))
+        o = int(800 * (1 + seed % 4) * math.cos(((i + seed) % 5) / 5 * 2 * math.pi))
+        foreign.append(f)
+        organ.append(o)
+        indiv.append(-(f + o))
+    stock.supply = {"dates": _last_days(n), "foreign": foreign, "organ": organ,
+                    "individual": indiv, "foreignHold": f"{30 + seed % 30}.0%"}
+
+
+def fetch_supply(stock: Stock) -> None:
+    """투자자별 순매수(외국인·기관·개인) 최근 10일 — 네이버 금융(국내 종목만)."""
+    if not _is_kr(stock.ticker):
+        return
+    try:
+        import requests
+        code = stock.ticker.split(".")[0]
+        r = requests.get(
+            f"https://m.stock.naver.com/api/stock/{code}/trend",
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.naver.com/"},
+            timeout=12,
+        )
+        rows = r.json()
+        if not isinstance(rows, list) or not rows:
+            return
+        rows = rows[::-1]  # 과거→현재
+        col = lambda k: [int(_to_num(x.get(k)) or 0) for x in rows]  # noqa: E731
+        stock.supply = {
+            "dates": [f"{x['bizdate'][4:6]}-{x['bizdate'][6:8]}" for x in rows],
+            "foreign": col("foreignerPureBuyQuant"),
+            "organ": col("organPureBuyQuant"),
+            "individual": col("individualPureBuyQuant"),
+            "foreignHold": rows[-1].get("foreignerHoldRatio", ""),
+        }
+    except Exception as e:  # noqa: BLE001
+        print(f"  [warn] {stock.name} 수급 수집 실패: {e}", file=sys.stderr)
 
 
 def fetch_history(stock: Stock) -> None:
@@ -191,6 +248,7 @@ def load_sample() -> tuple[list[Stock], str]:
                 ev_ebitda=r.get("ev_ebitda"), roic=r.get("roic"), peg=r.get("peg"),
             )
             synth_history(s)
+            synth_supply(s)
             stocks.append(s)
     return stocks, raw.get("as_of", "")
 
@@ -510,6 +568,7 @@ def collect_live() -> tuple[list[Stock], str]:
                 else:
                     s = fetch_yahoo(r["name"], r["ticker"], section)
                 fetch_history(s)  # 최근 3년 월봉
+                fetch_supply(s)   # 최근 10일 투자자별 순매수(국내)
                 stocks.append(s)
             except Exception as e:  # noqa: BLE001 — 종목 1건 실패가 전체를 막지 않도록
                 print(f"  [warn] {r['name']}({r['ticker']}) 수집 실패: {e}", file=sys.stderr)
@@ -668,7 +727,8 @@ def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str
                + " ".join(f'<button class="term" data-term="{k}">{lbl}</button>'
                           for k, lbl in [("per", "PER"), ("pbr", "PBR"),
                                          ("ev_ebitda", "EV/EBITDA"), ("roic", "ROIC"),
-                                         ("peg", "PEG"), ("mktcap", "시가총액")])
+                                         ("peg", "PEG"), ("mktcap", "시가총액"),
+                                         ("supply", "수급")])
                + "</p>")
     out.append("")
 
@@ -755,7 +815,8 @@ def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str
     # --- 차트 데이터(레이아웃의 차트 위젯이 읽음) ---
     chart_payload = {
         s.name: {"ticker": s.ticker, "section": s.section,
-                 "dates": s.history["dates"], "closes": s.history["closes"]}
+                 "dates": s.history["dates"], "closes": s.history["closes"],
+                 "supply": s.supply}
         for s in stocks if s.history
     }
     out.append('<script id="chart-data" type="application/json">')
