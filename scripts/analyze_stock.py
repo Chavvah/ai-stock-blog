@@ -119,6 +119,7 @@ class Stock:
     cheap_flags: list[str] = field(default_factory=list)
     history: Optional[dict] = None  # {"dates": [...], "closes": [...]} 최근 3년 월봉
     supply: Optional[dict] = None   # 수급: {dates, foreign, organ, individual, foreignHold} 최근 10일
+    last_close: Optional[dict] = None  # 전일 종가: {price, pct, dir, date, cur}
 
     def metric(self, key: str) -> Optional[float]:
         return getattr(self, key)
@@ -205,6 +206,25 @@ def fetch_supply(stock: Stock) -> None:
             "individual": col("individualPureBuyQuant"),
             "foreignHold": rows[-1].get("foreignerHoldRatio", ""),
         }
+        # 전일 종가(KRX 공식 KRW) — 네이버 최신 행
+        last = rows[-1]
+        price = _to_num(last.get("closePrice"))
+        chg = _to_num(last.get("compareToPreviousClosePrice")) or 0
+        dirn = (last.get("compareToPreviousPrice") or {}).get("name", "")
+        if price:
+            if "RISING" in dirn or "UPPER" in dirn:
+                prev, sign = price - chg, 1
+            elif "FALLING" in dirn or "LOWER" in dirn or "DOWN" in dirn:
+                prev, sign = price + chg, -1
+            else:
+                prev, sign = price, 0
+            pct = round(sign * chg / prev * 100, 2) if prev else 0.0
+            stock.last_close = {
+                "price": price, "pct": pct,
+                "dir": "up" if sign > 0 else ("down" if sign < 0 else "flat"),
+                "date": f"{last['bizdate'][:4]}-{last['bizdate'][4:6]}-{last['bizdate'][6:8]}",
+                "cur": "KRW",
+            }
     except Exception as e:  # noqa: BLE001
         print(f"  [warn] {stock.name} 수급 수집 실패: {e}", file=sys.stderr)
 
@@ -249,6 +269,11 @@ def load_sample() -> tuple[list[Stock], str]:
             )
             synth_history(s)
             synth_supply(s)
+            c = s.history["closes"]
+            pct = round((c[-1] - c[-2]) / c[-2] * 100, 2) if len(c) >= 2 and c[-2] else 0.0
+            s.last_close = {"price": c[-1], "pct": pct,
+                            "dir": "up" if pct > 0 else ("down" if pct < 0 else "flat"),
+                            "date": s.history["dates"][-1], "cur": s.currency or "KRW"}
             stocks.append(s)
     return stocks, raw.get("as_of", "")
 
@@ -268,13 +293,24 @@ def fetch_yahoo(name: str, ticker: str, section: str) -> Stock:
         roic = info["returnOnEquity"]
     if roic is not None:
         roic *= 100.0
-    return Stock(
+    s = Stock(
         name=name, ticker=ticker, source="yahoo", section=section,
         currency=info.get("currency", "USD"),
         market_cap=(info.get("marketCap") or 0) / 1e9 or None,
         per=_clean(per), pbr=_clean(pbr), ev_ebitda=_clean(ev_ebitda),
         roic=_clean(roic), peg=_clean(peg),
     )
+    # 전일 종가 + 등락률
+    price = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
+    prev = info.get("previousClose")
+    if price:
+        pct = round((price - prev) / prev * 100, 2) if prev else 0.0
+        s.last_close = {
+            "price": round(float(price), 2), "pct": pct,
+            "dir": "up" if pct > 0 else ("down" if pct < 0 else "flat"),
+            "date": "", "cur": info.get("currency", "USD"),
+        }
+    return s
 
 
 # --- OpenDART 상수 -----------------------------------------------------------
@@ -816,7 +852,7 @@ def build_markdown(stocks: list[Stock], top3: list[Stock], as_of: str, mode: str
     chart_payload = {
         s.name: {"ticker": s.ticker, "section": s.section,
                  "dates": s.history["dates"], "closes": s.history["closes"],
-                 "supply": s.supply}
+                 "supply": s.supply, "lastClose": s.last_close}
         for s in stocks if s.history
     }
     out.append('<script id="chart-data" type="application/json">')

@@ -11,6 +11,7 @@
     <label class="chart-pick">종목 선택:
       <select id="chart-select"></select>
     </label>
+    <p id="last-close" class="last-close"></p>
     <div class="chart-box"><canvas id="price-chart"></canvas></div>
     <p class="chart-note">월말 종가 기준 · 국내 KRX · 해외 Yahoo Finance</p>
 
@@ -48,8 +49,21 @@
   });
 
   var chart, supplyChart;
+  function showClose(lc) {
+    var el = document.getElementById("last-close");
+    if (!lc) { el.textContent = ""; return; }
+    var unit = lc.cur === "KRW" ? "원" : (" " + (lc.cur || ""));
+    var price = lc.cur === "KRW" ? Math.round(lc.price).toLocaleString() : lc.price.toLocaleString();
+    var arrow = lc.dir === "up" ? "▲" : (lc.dir === "down" ? "▼" : "—");
+    var cls = lc.dir === "up" ? "up" : (lc.dir === "down" ? "down" : "flat");
+    var sign = lc.pct > 0 ? "+" : "";
+    el.innerHTML = "전일 종가 <b>" + price + unit + "</b> " +
+      '<span class="chg ' + cls + '">' + arrow + " " + sign + lc.pct + "%</span>" +
+      (lc.date ? ' <span class="cdate">(' + lc.date + " 기준)</span>" : "");
+  }
   function draw(name) {
     var d = data[name];
+    showClose(d.lastClose);
     if (chart) chart.destroy();
     chart = new Chart(document.getElementById("price-chart"), {
       type: "line",

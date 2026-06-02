@@ -62,6 +62,12 @@ hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
 .chart-pick { font-weight: 600; font-size: .92rem; }
 .chart-pick select { font-size: 1rem; padding: 6px 10px; margin-left: 8px;
                      border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.last-close { margin: 10px 0 0; font-size: 1.05rem; }
+.last-close .chg { font-weight: 700; }
+.last-close .chg.up { color: #dc2626; }
+.last-close .chg.down { color: #2563eb; }
+.last-close .chg.flat { color: #6b7280; }
+.last-close .cdate { color: #9ca3af; font-size: .8rem; }
 .chart-box { position: relative; height: 340px; margin-top: 14px; }
 .chart-box-sm { height: 260px; }
 .chart-note { color: #9ca3af; font-size: .8rem; margin: 8px 0 0; }
