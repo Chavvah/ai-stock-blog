@@ -207,21 +207,16 @@ def fetch_supply(stock: Stock) -> None:
             "foreignHold": rows[-1].get("foreignerHoldRatio", ""),
         }
         # 전일 종가(KRX 공식 KRW) — 네이버 최신 행
+        # compareToPreviousClosePrice 는 부호 포함(하락 시 음수)이므로 그대로 사용
         last = rows[-1]
         price = _to_num(last.get("closePrice"))
         chg = _to_num(last.get("compareToPreviousClosePrice")) or 0
-        dirn = (last.get("compareToPreviousPrice") or {}).get("name", "")
         if price:
-            if "RISING" in dirn or "UPPER" in dirn:
-                prev, sign = price - chg, 1
-            elif "FALLING" in dirn or "LOWER" in dirn or "DOWN" in dirn:
-                prev, sign = price + chg, -1
-            else:
-                prev, sign = price, 0
-            pct = round(sign * chg / prev * 100, 2) if prev else 0.0
+            prev = price - chg
+            pct = round(chg / prev * 100, 2) if prev else 0.0
             stock.last_close = {
                 "price": price, "pct": pct,
-                "dir": "up" if sign > 0 else ("down" if sign < 0 else "flat"),
+                "dir": "up" if chg > 0 else ("down" if chg < 0 else "flat"),
                 "date": f"{last['bizdate'][:4]}-{last['bizdate'][4:6]}-{last['bizdate'][6:8]}",
                 "cur": "KRW",
             }
