@@ -91,7 +91,7 @@
       ["투자의견", s.recommMean == null ? "—" : s.recommMean + " (1매수~5매도)"]
     ];
     if (s.benchPER != null) {
-      var lbl = (s.basis && s.basis.indexOf("업종") >= 0) ? "업종" : "시장";
+      var lbl = (s.basis && s.basis.indexOf("업종(시총") >= 0) ? "업종" : "대형주";
       rows.push([lbl + " 평균 PER", s.benchPER + "배"]);
       rows.push([lbl + " 평균 PBR", s.benchPBR + "배"]);
     }
@@ -205,7 +205,8 @@
     document.querySelector(".dash-asof").textContent =
       "기준일 " + data.as_of + (data.generated_at ? " · 갱신 " + data.generated_at : "") +
       " · 검색 " + (data.count || Object.keys(data.stocks).length) + "종목" +
-      (bm.medPER ? " · KOSPI 중앙값 PER " + bm.medPER + " / PBR " + bm.medPBR : "") +
+      (data.industries ? " · 업종 " + data.industries + "개" : "") +
+      (bm.medPER ? " · 대형주 중앙값 PER " + bm.medPER + " / PBR " + bm.medPBR : "") +
       " · 정량 분석이며 투자 권유가 아닙니다.";
     var dl = document.getElementById("stock-list"); dl.innerHTML = "";
     Object.keys(data.stocks).forEach(function (n) {

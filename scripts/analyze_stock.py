@@ -947,9 +947,9 @@ def build_dashboard(stocks: list[Stock], top3: list[Stock], as_of: str,
     extra = extra or []
     MIN_CAP = 0.1  # 조 (= 1,000억) 미만 소형주는 평균 계산에서 제외
 
-    # KOSPI 전체 중앙값(업종 표본 부족 시 폴백)
-    _p = [s.per for s in extra if s.per and s.per > 0]
-    _b = [s.pbr for s in extra if s.pbr and s.pbr > 0]
+    # 폴백 기준 = 대형주(시총 1000억+) 중앙값 (소형주 왜곡 제거)
+    _p = [s.per for s in extra if s.per and s.per > 0 and s.market_cap and s.market_cap >= MIN_CAP]
+    _b = [s.pbr for s in extra if s.pbr and s.pbr > 0 and s.market_cap and s.market_cap >= MIN_CAP]
     med_per = statistics.median(_p) if _p else None
     med_pbr = statistics.median(_b) if _b else None
 
@@ -979,11 +979,11 @@ def build_dashboard(stocks: list[Stock], top3: list[Stock], as_of: str,
         if s.ticker in seen_tickers or s.name in out:
             continue
         avg = ind_avg.get(s.industry or "")
-        use_ind = bool(avg and avg["n"] >= 5 and avg["per"] and avg["pbr"])
+        use_ind = bool(avg and avg["n"] >= 3 and avg["per"] and avg["pbr"])
         if use_ind:
             b_per, b_pbr, basis = avg["per"], avg["pbr"], f"{s.industry} 업종(시총 가중) 평균"
         else:
-            b_per, b_pbr, basis = med_per, med_pbr, "KOSPI 전체 중앙값(업종 표본 부족)"
+            b_per, b_pbr, basis = med_per, med_pbr, "대형주 중앙값(업종 표본 부족)"
         vs = []
         if s.per and s.per > 0 and b_per:
             vs.append((b_per - s.per) / b_per)
