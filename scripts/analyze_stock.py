@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_PATH = ROOT / "data" / "sample_data.json"
 POSTS_DIR = ROOT / "content" / "posts"   # Hugo 콘텐츠 디렉터리
 LATEST_PATH = ROOT / "static" / "data" / "latest.json"  # 메인 대시보드용
+HISTORY_PATH = ROOT / "static" / "data" / "history.json"  # 일별 Top 10 스냅샷 누적
 KST = timezone(timedelta(hours=9))
 
 SECTION_ORDER = [
@@ -1064,8 +1065,93 @@ def _quote_fields(s: Stock) -> dict:
     }
 
 
+def _snapshot(top: list[Stock], as_of: str) -> dict:
+    snap = []
+    for i, s in enumerate(top, 1):
+        lc = s.last_close or {}
+        snap.append({"name": s.name, "ticker": s.ticker, "rank": i,
+                     "close": lc.get("price"), "cur": lc.get("cur", "USD")})
+    return {"date": as_of, "top10": snap}
+
+
+def bootstrap_history(stocks: list[Stock], as_of: str) -> dict:
+    """기존 리포트(top3)로 과거 순위 스냅샷 복원(최초 1회).
+
+    종가는 월봉 기준이라 같은 달은 의미가 없어 None 처리(성과추적은 실측 누적분만).
+    """
+    import re
+    by_name = {s.name: s for s in stocks}
+    cur_ym = as_of[:7]
+    snaps = []
+    for p in sorted(POSTS_DIR.glob("*-daily-ai-top3.md")):
+        txt = p.read_text(encoding="utf-8")
+        md = re.search(r"^date:\s*(\d{4}-\d{2}-\d{2})", txt, re.M)
+        mt = re.search(r"^top3:\s*\[(.*?)\]", txt, re.M) or re.search(r"^tags:\s*\[(.*?)\]", txt, re.M)
+        if not md or not mt:
+            continue
+        date = md.group(1)
+        if date >= as_of:
+            continue
+        names = [t.strip().strip('"') for t in mt.group(1).split(",")][:3]
+        snap = []
+        for i, n in enumerate(names, 1):
+            s = by_name.get(n)
+            close, cur = None, "USD"
+            if s and s.history and date[:7] != cur_ym:  # 같은 달이면 종가 None
+                cur = (s.last_close or {}).get("cur", "USD")
+                ds = s.history["dates"]
+                if date[:7] in ds:
+                    close = s.history["closes"][ds.index(date[:7])]
+            snap.append({"name": n, "ticker": s.ticker if s else "", "rank": i,
+                         "close": close, "cur": cur})
+        snaps.append({"date": date, "top10": snap})
+    return {"snapshots": snaps}
+
+
+def update_history(top: list[Stock], stocks: list[Stock], as_of: str) -> dict:
+    """history.json에 오늘 스냅샷 추가(없으면 부트스트랩). 최근 90일 유지."""
+    try:
+        hist = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        hist = None
+    if not hist or not hist.get("snapshots"):
+        hist = bootstrap_history(stocks, as_of)
+    snaps = [s for s in hist["snapshots"] if s["date"] != as_of]
+    snaps.append(_snapshot(top, as_of))
+    snaps.sort(key=lambda x: x["date"])
+    hist = {"snapshots": snaps[-90:]}
+    HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    HISTORY_PATH.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")
+    return hist
+
+
+def rank_deltas(hist: dict) -> dict:
+    """오늘 Top 10의 전일 대비 순위 변동(+오름/−내림/None=신규)."""
+    snaps = hist["snapshots"]
+    if len(snaps) < 2:
+        return {}
+    prev = {x["name"]: x["rank"] for x in snaps[-2]["top10"]}
+    return {x["name"]: (prev[x["name"]] - x["rank"]) if x["name"] in prev else None
+            for x in snaps[-1]["top10"]}
+
+
+def performance(hist: dict, stocks: list[Stock]) -> list[dict]:
+    """과거 각 스냅샷 Top 10의 현재까지 평균 수익률."""
+    cur = {s.name: (s.last_close or {}).get("price") for s in stocks}
+    out = []
+    for snap in hist["snapshots"][:-1]:
+        rets = [cur[x["name"]] / x["close"] - 1
+                for x in snap["top10"]
+                if x.get("close") and cur.get(x["name"])]
+        if rets:
+            out.append({"date": snap["date"], "avg": round(sum(rets) / len(rets) * 100, 1),
+                        "n": len(rets)})
+    return out
+
+
 def build_dashboard(stocks: list[Stock], top: list[Stock], as_of: str,
-                    news: Optional[dict], extra: Optional[list[Stock]] = None) -> dict:
+                    news: Optional[dict], extra: Optional[list[Stock]] = None,
+                    deltas: Optional[dict] = None, perf: Optional[list] = None) -> dict:
     """메인 대시보드(검색·차트·추천여부·뉴스)용 JSON 데이터.
 
     stocks = AI 4개 섹션(정밀 분석), extra = KOSPI 시총상위(기본 시세).
@@ -1177,6 +1263,7 @@ def build_dashboard(stocks: list[Stock], top: list[Stock], as_of: str,
         seen_tickers.add(s.ticker)
 
     return {"as_of": as_of, "top3": [t.name for t in top[:3]], "top10": [t.name for t in top],
+            "rankDeltas": deltas or {}, "performance": perf or [],
             "generated_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
             "stocks": out, "news": news or {},
             "count": len(out), "industries": len(ind_avg),
@@ -1220,8 +1307,18 @@ def fmt(v: Optional[float], suffix: str = "") -> str:
 
 
 def build_markdown(stocks: list[Stock], top: list[Stock], as_of: str, mode: str,
-                   news: Optional[dict] = None) -> str:
+                   news: Optional[dict] = None, deltas: Optional[dict] = None,
+                   perf: Optional[list] = None) -> str:
     top3 = top[:3]
+    deltas = deltas or {}
+
+    def delta_str(name: str) -> str:
+        if name not in deltas:
+            return "—"
+        d = deltas[name]
+        if d is None:
+            return "NEW"
+        return "—" if d == 0 else (f"▲{d}" if d > 0 else f"▼{-d}")
     by_section: dict[str, list[Stock]] = {}
     for s in stocks:
         by_section.setdefault(s.section, []).append(s)
@@ -1263,20 +1360,43 @@ def build_markdown(stocks: list[Stock], top: list[Stock], as_of: str, mode: str,
     # --- 오늘의 AI 저평가 Top 10 (전체 종합점수 순) ---
     out.append("## 오늘의 AI 저평가 Top 10")
     out.append("")
-    out.append("| 섹션 | 종목 | 종합점수 | PER | PBR | EV/EBITDA | ROIC | PEG | 1년주가 | 비고 |")
-    out.append("|:---|:---|---:|---:|---:|---:|---:|---:|---:|:---|")
+    out.append("| 섹션 | 종목 | 전일대비 | 종합점수 | PER | PBR | EV/EBITDA | ROIC | PEG | 1년주가 | 비고 |")
+    out.append("|:---|:---|:---:|---:|---:|---:|---:|---:|---:|---:|:---|")
     for i, s in enumerate(top, 1):
         mom = f"{s.momentum:+g}%" if s.momentum is not None else "—"
         note = "[하락주의]" if s.trend_warn else ""
         out.append(
-            f"| {s.section} | **{i}. {s.name}** ({s.ticker}) | {s.composite:.3f} | "
+            f"| {s.section} | **{i}. {s.name}** ({s.ticker}) | {delta_str(s.name)} | {s.composite:.3f} | "
             f"{fmt(s.per)} | {fmt(s.pbr)} | {fmt(s.ev_ebitda)} | "
             f"{fmt(s.roic, '%')} | {fmt(s.peg)} | {mom} | {note} |"
         )
     out.append("")
     out.append("<sub>전체 종합점수 순. 섹션 편중 없이 점수 그대로 — 본인 판단으로 선택하세요. "
+               "`전일대비`는 어제 순위 대비 변동(▲상승/▼하락/NEW 신규), "
                "`[하락주의]`는 최근 1년 주가 하락 추세(가치 함정 가능)입니다.</sub>")
     out.append("")
+
+    # --- 성과 추적 (과거 Top 10의 현재까지 수익률) ---
+    if perf:
+        out.append("### 성과 추적")
+        out.append("")
+        out.append("> 과거 추천 Top 10이 그 후 실제로 어떻게 됐는지(현재가 대비 평균 수익률). "
+                   "시스템의 실효성을 스스로 검증합니다.")
+        out.append("")
+        out.append("| 추천일 | 경과 | Top 10 평균 수익률 |")
+        out.append("|:---|:---|---:|")
+        from datetime import date as _date
+        y, m, d = (int(x) for x in as_of.split("-"))
+        for row in perf[-7:][::-1]:
+            try:
+                py, pm, pd = (int(x) for x in row["date"].split("-"))
+                days = (_date(y, m, d) - _date(py, pm, pd)).days
+                elapsed = f"{days}일 전"
+            except Exception:  # noqa: BLE001
+                elapsed = "—"
+            sign = "+" if row["avg"] >= 0 else ""
+            out.append(f"| {row['date']} | {elapsed} | **{sign}{row['avg']}%** |")
+        out.append("")
 
     # --- 상위 3종목 선정 근거 ---
     out.append("### 상위 3종목 선정 근거")
@@ -1440,10 +1560,15 @@ def main() -> int:
         print("[info] KOSPI 전 종목 수집 중...", file=sys.stderr)
         kospi = collect_kospi()  # 전 종목
 
-    md = build_markdown(stocks, top, as_of, args.mode, news)
+    # 일별 Top 10 스냅샷 누적 → 순위 변동 + 성과 추적
+    hist = update_history(top, stocks, as_of)
+    deltas = rank_deltas(hist)
+    perf = performance(hist, stocks)
+
+    md = build_markdown(stocks, top, as_of, args.mode, news, deltas, perf)
 
     # 메인 대시보드 데이터(AI 정밀 + KOSPI 전 종목 검색)
-    dash = build_dashboard(stocks, top, as_of, news, kospi)
+    dash = build_dashboard(stocks, top, as_of, news, kospi, deltas, perf)
     if args.mode != "sample":
         print("[info] 저평가/AI 국내 종목 3년 순이익 추세 수집 중...", file=sys.stderr)
         enrich_income_trends(dash)
