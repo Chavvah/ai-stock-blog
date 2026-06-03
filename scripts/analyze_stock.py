@@ -319,15 +319,19 @@ def enrich_income_trends(dash: dict, top_n: int = 120) -> None:
             targets.append((name, s))
     # 저평가 다수일 수 있으니 시총 상위 우선
     targets.sort(key=lambda x: x[1].get("marketCap") or 0, reverse=True)
-    done = 0
-    for name, s in targets:
-        if done >= top_n:
-            break
-        tr = fetch_income_trend(s["ticker"].split(".")[0])
-        if tr:
-            s["incomeTrend"] = tr
-        done += 1
-    print(f"  [info] 3년 순이익 추세 {done}종목 처리", file=sys.stderr)
+    targets = targets[:top_n]
+    _load_corp_map()  # corp_code 매핑 프리워밍(스레드 경쟁 방지)
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(t: tuple) -> tuple:
+        name, s = t
+        return name, fetch_income_trend(s["ticker"].split(".")[0])
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        for name, tr in ex.map(one, targets):
+            if tr:
+                stocks[name]["incomeTrend"] = tr
+    print(f"  [info] 3년 순이익 추세 {len(targets)}종목 병렬 처리", file=sys.stderr)
 
 
 _INDUSTRY: dict[str, str] = {}
@@ -378,14 +382,18 @@ def collect_kospi(limit: Optional[int] = None, chart_top: int = 300) -> list[Sto
         print(f"  [warn] KOSPI 리스트 수집 실패: {e}", file=sys.stderr)
         return out
     _load_industry()
-    total = len(df)
-    for idx, (_, r) in enumerate(df.iterrows()):
+    _krx_market_cap("005930")  # KRX 시총 캐시 프리워밍(스레드 경쟁 방지)
+    from concurrent.futures import ThreadPoolExecutor
+    rows = list(df.iterrows())
+
+    def build_one(arg: tuple) -> Stock:
+        idx, (_, r) = arg
         code = str(r["Code"])
         s = Stock(name=str(r["Name"]), ticker=f"{code}.KS", source="kospi",
                   section="KOSPI", currency="KRW", ai_universe=False,
                   industry=_INDUSTRY.get(code))
         try:
-            krx_cap = _krx_market_cap(code)  # KRX 공식 시총 우선
+            krx_cap = _krx_market_cap(code)
             s.market_cap = round((krx_cap if krx_cap else float(r["Marcap"])) / 1e12, 2)
             s.volume = float(r["Volume"]) if r.get("Volume") == r.get("Volume") else None
             close = float(r["Close"]); chg = float(r.get("ChagesRatio") or 0)
@@ -394,12 +402,14 @@ def collect_kospi(limit: Optional[int] = None, chart_top: int = 300) -> list[Sto
                             "date": "", "cur": "KRW"}
         except Exception:  # noqa: BLE001
             pass
-        fetch_quote(s)            # 전 종목 PER/PBR/52주/목표가
+        fetch_quote(s)                 # 전 종목 PER/PBR/52주/목표가(네이버)
         if idx < chart_top:
-            fetch_history(s)      # 시총 상위만 3년 차트
-        out.append(s)
-        if idx % 100 == 99:
-            print(f"  [info] KOSPI {idx + 1}/{total} 수집...", file=sys.stderr)
+            fetch_history(s)           # 시총 상위만 3년 차트(FDR)
+        return s
+
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        out = list(ex.map(build_one, enumerate(rows)))
+    print(f"  [info] KOSPI {len(out)}종목 병렬 수집 완료", file=sys.stderr)
     return out
 
 
@@ -859,20 +869,27 @@ def _clean(v) -> Optional[float]:
 
 
 def collect_live() -> tuple[list[Stock], str]:
-    stocks: list[Stock] = []
-    for section, rows in UNIVERSE.items():
-        for r in rows:
-            try:
-                if r["source"] == "dart":
-                    s = fetch_dart(r["name"], r["ticker"], section, r.get("corp_code", ""))
-                else:
-                    s = fetch_yahoo(r["name"], r["ticker"], section)
-                fetch_history(s)  # 최근 3년 월봉
-                fetch_supply(s)   # 최근 10일 투자자별 순매수(국내)
-                fetch_quote(s)    # 목표가·52주·거래량
-                stocks.append(s)
-            except Exception as e:  # noqa: BLE001 — 종목 1건 실패가 전체를 막지 않도록
-                print(f"  [warn] {r['name']}({r['ticker']}) 수집 실패: {e}", file=sys.stderr)
+    from concurrent.futures import ThreadPoolExecutor
+    _krx_market_cap("005930")  # KRX 시총 캐시 프리워밍(병렬 경쟁 방지)
+    items = [(section, r) for section, rows in UNIVERSE.items() for r in rows]
+
+    def fetch_one(arg: tuple) -> Optional[Stock]:
+        section, r = arg
+        try:
+            if r["source"] == "dart":
+                s = fetch_dart(r["name"], r["ticker"], section, r.get("corp_code", ""))
+            else:
+                s = fetch_yahoo(r["name"], r["ticker"], section)
+            fetch_history(s)
+            fetch_supply(s)
+            fetch_quote(s)
+            return s
+        except Exception as e:  # noqa: BLE001
+            print(f"  [warn] {r['name']}({r['ticker']}) 수집 실패: {e}", file=sys.stderr)
+            return None
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        stocks = [s for s in ex.map(fetch_one, items) if s]
     return stocks, datetime.now(KST).strftime("%Y-%m-%d")
 
 
