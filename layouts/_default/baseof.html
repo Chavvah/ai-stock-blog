@@ -9,9 +9,24 @@
 </head>
 <body>
   <header class="site-header">
+    <button id="refresh-btn" type="button" title="최신 데이터 다시 불러오기 (매일 07:00 KST 갱신)">
+      <span class="ref-ico">↻</span> 새로고침
+    </button>
     <a class="site-title" href="{{ site.Home.RelPermalink }}">{{ .Site.Title }}</a>
     <p class="site-tagline">{{ .Site.Params.description }}</p>
   </header>
+  <script>
+  document.getElementById("refresh-btn").addEventListener("click", function () {
+    var b = this; b.classList.add("spinning");
+    if (typeof window.__refreshDashboard === "function") {
+      Promise.resolve(window.__refreshDashboard()).finally(function () {
+        setTimeout(function () { b.classList.remove("spinning"); }, 400);
+      });
+    } else {
+      location.reload();
+    }
+  });
+  </script>
   <main class="container">
     {{ block "main" . }}{{ end }}
   </main>

@@ -954,6 +954,7 @@ def build_dashboard(stocks: list[Stock], top3: list[Stock], as_of: str,
         seen_tickers.add(s.ticker)
 
     return {"as_of": as_of, "top3": [t.name for t in top3],
+            "generated_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M KST"),
             "stocks": out, "news": news or {},
             "count": len(out),
             "benchmark": {"medPER": round(med_per, 2) if med_per else None,
