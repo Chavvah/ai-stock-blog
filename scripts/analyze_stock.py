@@ -1440,7 +1440,7 @@ def main() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(md, encoding="utf-8")
     print(f"✅ 리포트 생성: {out_path}")
-    print(f"   Top 3: {', '.join(f'{s.name}({s.composite:.3f})' for s in top3)}")
+    print(f"   Top 10: {', '.join(f'{s.name}({s.composite:.3f})' for s in top)}")
     return 0
 
 
