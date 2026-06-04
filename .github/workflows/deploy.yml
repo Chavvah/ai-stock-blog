@@ -1,11 +1,15 @@
 name: Build & Deploy (Hugo)
 
 on:
-  # 매일 07:00 KST = 22:00 UTC(전일). GitHub cron은 지연·누락이 잦아 백업 시각 추가.
+  # 매일 07:00 KST = 22:00 UTC(전일).
+  # GitHub cron은 정시(:00,:30)에 부하가 몰려 누락이 잦음 → 오프피크(홀수) 분으로 분산 + 백업 다중화.
+  # (중복 가드 step이 있어 여러 번 떠도 하루 1개만 생성)
   schedule:
-    - cron: "0 22 * * *"    # 07:00 KST
-    - cron: "30 22 * * *"   # 07:30 KST (백업)
-    - cron: "0 23 * * *"    # 08:00 KST (백업)
+    - cron: "3 22 * * *"    # 07:03 KST
+    - cron: "17 22 * * *"   # 07:17 KST (백업)
+    - cron: "33 22 * * *"   # 07:33 KST (백업)
+    - cron: "47 22 * * *"   # 07:47 KST (백업)
+    - cron: "9 23 * * *"    # 08:09 KST (백업)
   # 코드/콘텐츠 push 시 재배포
   push:
     branches: [main]
