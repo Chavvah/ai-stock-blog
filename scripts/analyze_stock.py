@@ -43,6 +43,7 @@ SECTION_ORDER = [
     "광통신",
     "CPU/NPU",
     "SSD/메모리",
+    "AI 반도체",
 ]
 
 # 섹터 메타(아이콘·URL slug·한 줄 설명) — 전체 페이지/섹터 상세 페이지에서 사용.
@@ -59,6 +60,8 @@ SECTOR_META: dict[str, dict] = {
                    "desc": "AI 연산의 두뇌 — CPU·GPU·AI 가속기(NPU)."},
     "SSD/메모리":     {"emoji": "💾", "slug": "memory",
                    "desc": "AI 데이터 저장·고용량 메모리(SSD·NAND)."},
+    "AI 반도체":      {"emoji": "🏭", "slug": "semiconductor",
+                   "desc": "AI 칩을 실제로 만드는 파운드리·메모리·노광장비·HBM 후공정."},
 }
 
 # 분석 유니버스(섹션별 종목). live 모드의 수집 대상이기도 하다.
@@ -106,6 +109,14 @@ UNIVERSE: dict[str, list[dict]] = {
     "SSD/메모리": [
         {"name": "샌디스크", "ticker": "SNDK", "source": "yahoo"},
         {"name": "키옥시아", "ticker": "285A.T", "source": "yahoo"},
+    ],
+    "AI 반도체": [
+        {"name": "TSMC", "ticker": "TSM", "source": "yahoo"},
+        {"name": "삼성전자", "ticker": "005930.KS", "source": "dart"},
+        {"name": "SK하이닉스", "ticker": "000660.KS", "source": "dart"},
+        {"name": "마이크론", "ticker": "MU", "source": "yahoo"},
+        {"name": "ASML", "ticker": "ASML", "source": "yahoo"},
+        {"name": "한미반도체", "ticker": "042700.KS", "source": "dart"},
     ],
 }
 
@@ -444,6 +455,7 @@ SECTION_NEWS_QUERY = {
     "광통신": "광통신 OR 실리콘 포토닉스 OR 광트랜시버 OR 데이터센터 네트워크",
     "CPU/NPU": "AI 반도체 OR GPU OR AI 가속기 OR 엔비디아 OR 데이터센터 CPU",
     "SSD/메모리": "AI 메모리 OR HBM OR 데이터센터 SSD OR NAND OR 낸드플래시",
+    "AI 반도체": "파운드리 OR HBM OR 반도체 장비 OR TSMC OR 삼성전자 반도체",
 }
 
 
@@ -963,7 +975,7 @@ def section_peer_avg(stocks: list[Stock], metric: str) -> Optional[float]:
 
 # 섹터 성격 — '하드웨어'(자산집약·순환: 발전소·변압기·메모리 fab 등 유형자산/장부가 중시 → PBR·EV/EBITDA),
 # '소프트웨어'(성장·자본효율 중시 → ROIC·PEG: 냉각·광통신·연산 반도체는 수주/성장 모멘텀이 핵심).
-HARDWARE_SECTORS = {"전력 인프라/장비", "에너지·원전", "SSD/메모리"}
+HARDWARE_SECTORS = {"전력 인프라/장비", "에너지·원전", "SSD/메모리", "AI 반도체"}
 
 # 섹터별 멀티플 할인 가중치(value_score): 하드웨어는 PBR·EV/EBITDA 중시
 DISC_WEIGHTS = {
