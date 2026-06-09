@@ -1217,13 +1217,18 @@ def _quote_fields(s: Stock) -> dict:
     }
 
 
-def _snapshot(top: list[Stock], as_of: str) -> dict:
+def _snap_list(top: list[Stock]) -> list[dict]:
     snap = []
     for i, s in enumerate(top, 1):
         lc = s.last_close or {}
         snap.append({"name": s.name, "ticker": s.ticker, "rank": i,
                      "close": lc.get("price"), "cur": lc.get("cur", "USD")})
-    return {"date": as_of, "top10": snap}
+    return snap
+
+
+def _snapshot(top: list[Stock], top_growth: list[Stock], as_of: str) -> dict:
+    """저평가(top10)와 성장(top10_growth) 두 렌즈를 함께 기록."""
+    return {"date": as_of, "top10": _snap_list(top), "top10_growth": _snap_list(top_growth)}
 
 
 def bootstrap_history(stocks: list[Stock], as_of: str) -> dict:
@@ -1260,7 +1265,8 @@ def bootstrap_history(stocks: list[Stock], as_of: str) -> dict:
     return {"snapshots": snaps}
 
 
-def update_history(top: list[Stock], stocks: list[Stock], as_of: str) -> dict:
+def update_history(top: list[Stock], top_growth: list[Stock],
+                   stocks: list[Stock], as_of: str) -> dict:
     """history.json에 오늘 스냅샷 추가(없으면 부트스트랩). 최근 90일 유지."""
     try:
         hist = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
@@ -1269,7 +1275,7 @@ def update_history(top: list[Stock], stocks: list[Stock], as_of: str) -> dict:
     if not hist or not hist.get("snapshots"):
         hist = bootstrap_history(stocks, as_of)
     snaps = [s for s in hist["snapshots"] if s["date"] != as_of]
-    snaps.append(_snapshot(top, as_of))
+    snaps.append(_snapshot(top, top_growth, as_of))
     snaps.sort(key=lambda x: x["date"])
     hist = {"snapshots": snaps[-90:]}
     HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -1778,7 +1784,7 @@ def main() -> int:
         kospi = collect_kospi()  # 전 종목
 
     # 일별 Top 10 스냅샷 누적 → 순위 변동 + 성과 추적
-    hist = update_history(top, stocks, as_of)
+    hist = update_history(top, top_growth, stocks, as_of)
     deltas = rank_deltas(hist)
     perf = performance(hist, stocks)
 
