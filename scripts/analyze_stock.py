@@ -158,8 +158,16 @@ class Stock:
     cycle_warn: bool = False          # 경기민감주 정점 경고(저PER 착시 가능)
     forward_pe: Optional[float] = None  # 추정 PER(선행)
     forward_score: float = 0.0          # 추정치(이익전망·목표가·투자의견) 신호
-    growth_score: float = 0.0           # '앞으로 오른다' 렌즈: 전망·성장·모멘텀 종합
+    growth_score: float = 0.0           # '앞으로 오른다' 렌즈: 퀄리티·모멘텀·이익상향 종합
     composite: float = 0.0
+    # 멀티팩터 z-score(섹터 중립) — 기관식 5팩터
+    high52_prox: Optional[float] = None  # 52주 신고가 근접도(0~1, 1=신고가)
+    f_value: float = 0.0     # 밸류(쌀수록↑)
+    f_quality: float = 0.0   # 퀄리티(ROIC 등)
+    f_momentum: float = 0.0  # 모멘텀(12-1개월 + 52주 신고가 근접)
+    f_forward: float = 0.0   # 전망(목표가 상승여력·이익추정 상향·투자의견)
+    f_growth: float = 0.0    # 성장(이익추세·PEG)
+    overheat: bool = False   # 과열(파라볼릭) — '지금 사기엔 늦음' 경고
     is_candidate: bool = False     # 1차 후보군 여부
     cheap_flags: list[str] = field(default_factory=list)
     history: Optional[dict] = None  # {"dates": [...], "closes": [...]} 최근 3년 월봉
@@ -980,12 +988,11 @@ def section_peer_avg(stocks: list[Stock], metric: str) -> Optional[float]:
 # '소프트웨어'(성장·자본효율 중시 → ROIC·PEG: 냉각·광통신·연산 반도체는 수주/성장 모멘텀이 핵심).
 HARDWARE_SECTORS = {"전력 인프라/장비", "에너지·원전", "SSD/메모리", "AI 반도체"}
 
-# 섹터별 멀티플 할인 가중치(value_score): 하드웨어는 PBR·EV/EBITDA 중시
+# 섹터별 멀티플 할인 가중치(value_score 표시용): 하드웨어는 PBR·EV/EBITDA 중시
 DISC_WEIGHTS = {
     "hardware": {"per": 0.25, "pbr": 0.40, "ev_ebitda": 0.35},
     "software": {"per": 0.45, "pbr": 0.10, "ev_ebitda": 0.45},
 }
-# 섹터별 가점 가중치: 소프트웨어는 ROIC(자본수익률)·PEG(성장성) 비중↑
 BONUS_WEIGHTS = {
     "hardware": {"roic": 0.25, "peg": 0.35},
     "software": {"roic": 0.55, "peg": 0.70},
@@ -994,6 +1001,58 @@ BONUS_WEIGHTS = {
 
 def sector_profile(section: str) -> str:
     return "hardware" if section in HARDWARE_SECTORS else "software"
+
+
+# ── 멀티팩터(기관식) — 섹터를 3가지 성격으로 세분, 팩터 가중치를 정밀화 ──
+# capital=자산집약(전력·에너지) / cyclical=경기민감(메모리·반도체) / growth=성장(냉각·광통신·연산)
+SECTOR_PROFILE3 = {
+    "전력 인프라/장비": "capital", "에너지·원전": "capital",
+    "SSD/메모리": "cyclical", "AI 반도체": "cyclical",
+    "냉각 기술": "growth", "광통신": "growth", "CPU/NPU": "growth",
+}
+# 팩터 순서: [value, quality, momentum, forward, growth]
+# 저평가(value) 렌즈 — '지금 싼 정도' 중심
+VALUE_FACTOR_W = {
+    "capital":  {"value": .50, "quality": .25, "momentum": .05, "forward": .10, "growth": .10},
+    "growth":   {"value": .35, "quality": .30, "momentum": .05, "forward": .15, "growth": .15},
+    "cyclical": {"value": .35, "quality": .20, "momentum": .05, "forward": .25, "growth": .15},
+}
+# 앞으로(growth) 렌즈 — 퀄리티(IC 1위)+모멘텀(52주 신고가)+이익상향 중심
+GROWTH_FACTOR_W = {
+    "capital":  {"value": .05, "quality": .30, "momentum": .30, "forward": .25, "growth": .10},
+    "growth":   {"value": .05, "quality": .25, "momentum": .30, "forward": .25, "growth": .15},
+    "cyclical": {"value": .05, "quality": .25, "momentum": .25, "forward": .30, "growth": .15},
+}
+
+
+def profile3(section: str) -> str:
+    return SECTOR_PROFILE3.get(section, "growth")
+
+
+def _zmap(group: list["Stock"], getter, lower_better: bool = False) -> dict:
+    """섹터 중립 z-score 맵(id(stock)→z, ±2 클램프). 표본<2 또는 표준편차 0이면 0."""
+    import statistics
+    pairs = [(s, getter(s)) for s in group]
+    vals = [v for _, v in pairs if v is not None]
+    if len(vals) < 2:
+        return {id(s): 0.0 for s, _ in pairs}
+    mu = statistics.fmean(vals)
+    sd = statistics.pstdev(vals)
+    out = {}
+    for s, v in pairs:
+        if v is None or sd == 0:
+            out[id(s)] = 0.0
+        else:
+            z = (v - mu) / sd
+            if lower_better:
+                z = -z
+            out[id(s)] = max(-2.0, min(2.0, z))
+    return out
+
+
+def _avg(xs: list) -> float:
+    xs = [x for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else 0.0
 
 
 def momentum_1y(history: Optional[dict]) -> Optional[float]:
@@ -1023,12 +1082,14 @@ CYCLICAL_SECTORS = {"SSD/메모리", "AI 반도체", "에너지·원전"}
 
 
 def score(stocks: list[Stock]) -> None:
-    """투자 해석 가이드를 반영한 섹터 가중 스코어링.
+    """기관식 멀티팩터 z-score 스코어링(섹터 중립).
 
-    - value_score: 동종평균 대비 멀티플 할인을 섹터별 가중치로 합산
-      (하드웨어=PBR·EV/EBITDA 중시, 소프트웨어=PER·이익효율 중시)
-    - 가점: ROIC·PEG에 섹터별 가중치 적용(소프트웨어에서 비중↑)
-    - 안전마진(margin of safety): PBR<1 또는 EV/EBITDA<동종평균에 가점
+    각 지표를 '섹터 내' z-score로 표준화해 5개 팩터로 묶고, 섹터 성격(자산집약/
+    경기민감/성장)별 가중치로 두 가지 종합점수를 만든다.
+      · composite(저평가 렌즈): Value 중심 — '지금 싼 정도'
+      · growth_score(앞으로 렌즈): Quality+Momentum(52주 신고가)+Forward 중심 — '오를 동력'
+    팩터: Value(쌀수록↑)·Quality(ROIC)·Momentum(12-1개월+52주 신고가 근접)·
+          Forward(목표가 상승여력·이익추정 상향·투자의견)·Growth(이익추세·PEG).
     """
     by_section: dict[str, list[Stock]] = {}
     for s in stocks:
@@ -1036,99 +1097,90 @@ def score(stocks: list[Stock]) -> None:
 
     for section, group in by_section.items():
         peer = {m: section_peer_avg(group, m) for m in VALUATION_METRICS}
-        prof = sector_profile(section)
-        dw, bw = DISC_WEIGHTS[prof], BONUS_WEIGHTS[prof]
+
+        # 파생 지표 선계산(모멘텀·52주 신고가 근접도)
         for s in group:
-            num = den = 0.0
-            cheaper_count = 0
-            for m in VALUATION_METRICS:
-                v, avg = s.metric(m), peer[m]
-                if v is None or avg is None or v <= 0:
-                    continue
-                disc = (avg - v) / avg  # +면 평균보다 쌈
-                num += dw[m] * disc
-                den += dw[m]
-                if disc > 0:
-                    cheaper_count += 1
-                    s.cheap_flags.append(METRIC_LABEL[m])
-            s.is_candidate = cheaper_count >= 2
-            s.value_score = (num / den) if den else -1.0
-
-            if s.roic is not None:
-                s.quality_bonus = max(0.0, min(s.roic, 40.0)) / 40.0
-            if s.peg is not None and 0 < s.peg < 1:
-                s.growth_bonus = 1 - s.peg
-
-            # 안전마진
-            safety = 0.0
-            if s.pbr is not None and s.pbr < 1.0:
-                safety += 0.30
-                s.safety_flags.append("PBR<1")
-            if s.ev_ebitda is not None and peer["ev_ebitda"] is not None \
-                    and s.ev_ebitda < peer["ev_ebitda"]:
-                safety += 0.10
-                s.safety_flags.append("EV/EBITDA<동종평균")
-            s.safety_bonus = safety
-
-            s.composite = (
-                s.value_score
-                + bw["roic"] * s.quality_bonus
-                + bw["peg"] * s.growth_bonus
-                + safety
-            )
-
-            # 추정치(선행) 신호 — 이익전망(추정PER<현재PER)·목표가 상승여력·투자의견
-            fwd = []
-            if s.per and s.per > 0 and s.forward_pe and s.forward_pe > 0:
-                fwd.append(max(-0.5, min(0.5, (s.per - s.forward_pe) / s.per)))
-            px = (s.last_close or {}).get("price")
-            if s.target_price and px:
-                fwd.append(max(-0.5, min(0.5, s.target_price / px - 1)))
-            if s.recomm_mean:
-                fwd.append(max(-0.5, min(0.5, (3 - s.recomm_mean) / 2)))
-            if fwd:
-                s.forward_score = round(sum(fwd) / len(fwd), 3)
-                s.composite += 0.35 * s.forward_score
-
-            # 주가 추세(모멘텀) 반영 — 하락 추세(가치 함정)에 비대칭 페널티
             s.momentum = momentum_1y(s.history)
             s.momentum_short = momentum_3m(s.history)
-            if s.momentum is not None:
-                f = s.momentum / 100.0
-                s.composite += (max(-0.5, f) * 1.2) if f < 0 else (min(0.15, f) * 0.8)
-                if s.momentum < -15:
-                    s.trend_warn = True
-            # 단기(3개월) 급락도 별도 반영 — '요즘 하락세' 경고 + 소폭 추가 페널티
-            if s.momentum_short is not None:
-                if s.momentum_short < -12:
-                    s.trend_warn = True
-                if s.momentum_short < 0:
-                    s.composite += max(-0.25, s.momentum_short / 100.0) * 0.5
+            px = (s.last_close or {}).get("price")
+            if px and s.week52_high:
+                s.high52_prox = round(px / s.week52_high, 3)
 
-            # 경기민감주 정점 경고 — 사이클 섹터인데 저PER + 큰 주가상승이면 '이익 정점' 신호
+        def mom_12_1(s):  # 12-1개월(최근 1개월 제외) — 학술 표준
+            c = (s.history or {}).get("closes") or []
+            if len(c) >= 13 and c[-13]:
+                return c[-2] / c[-13] - 1
+            return (s.momentum / 100.0) if s.momentum is not None else None
+
+        def earn_rev(s):  # 이익추정 상향 proxy: 추정PER<현재PER → 이익↑ 전망
+            if s.per and s.per > 0 and s.forward_pe and s.forward_pe > 0:
+                return (s.per - s.forward_pe) / s.per
+            return None
+
+        def upside(s):  # 목표가 상승여력
+            px = (s.last_close or {}).get("price")
+            return (s.target_price / px - 1) if (s.target_price and px) else None
+
+        def trend_num(s):
+            if s.income_trend and s.income_trend.get("trend"):
+                return {"up": 1.0, "mixed": 0.0, "down": -1.0}.get(s.income_trend["trend"])
+            return None
+
+        # 섹터 중립 z맵(낮을수록 좋은 지표는 lower_better)
+        z_per = _zmap(group, lambda s: s.per, True)
+        z_ev = _zmap(group, lambda s: s.ev_ebitda, True)
+        z_pbr = _zmap(group, lambda s: s.pbr, True)
+        z_roic = _zmap(group, lambda s: s.roic)
+        z_m121 = _zmap(group, mom_12_1)
+        z_prox = _zmap(group, lambda s: s.high52_prox)
+        z_up = _zmap(group, upside)
+        z_rev = _zmap(group, earn_rev)
+        z_rec = _zmap(group, lambda s: s.recomm_mean, True)
+        z_trend = _zmap(group, trend_num)
+        z_peg = _zmap(group, lambda s: s.peg, True)
+
+        wv, wg = VALUE_FACTOR_W[profile3(section)], GROWTH_FACTOR_W[profile3(section)]
+
+        for s in group:
+            i = id(s)
+            s.f_value = round(_avg([z_per[i], z_ev[i], z_pbr[i]]), 3)
+            s.f_quality = round(z_roic[i], 3)
+            s.f_momentum = round(_avg([z_m121[i], z_prox[i]]), 3)
+            s.f_forward = round(_avg([z_up[i], z_rev[i], z_rec[i]]), 3)
+            s.f_growth = round(_avg([z_trend[i], z_peg[i]]), 3)
+            F = {"value": s.f_value, "quality": s.f_quality, "momentum": s.f_momentum,
+                 "forward": s.f_forward, "growth": s.f_growth}
+
+            # 저평가(value) 렌즈
+            s.value_score = s.f_value
+            s.composite = round(sum(wv[k] * F[k] for k in F), 3)
+            s.forward_score = s.f_forward  # 기존 호환
+
+            # 저평가 플래그 / 후보군
+            s.cheap_flags = [METRIC_LABEL[m] for m, z in
+                             (("per", z_per[i]), ("pbr", z_pbr[i]), ("ev_ebitda", z_ev[i])) if z > 0]
+            s.is_candidate = s.f_value > 0.2
+            # 안전마진(절대 기준 소폭 가점)
+            if s.pbr is not None and s.pbr < 1.0:
+                s.safety_flags.append("PBR<1"); s.composite = round(s.composite + 0.15, 3)
+            if s.ev_ebitda is not None and peer["ev_ebitda"] and s.ev_ebitda < peer["ev_ebitda"]:
+                s.safety_flags.append("EV/EBITDA<동종평균")
+
+            # 경고들
+            if (s.momentum is not None and s.momentum < -15) or \
+               (s.momentum_short is not None and s.momentum_short < -12):
+                s.trend_warn = True
             if (section in CYCLICAL_SECTORS and s.per is not None and 0 < s.per < 10
                     and s.momentum is not None and s.momentum > 60):
                 s.cycle_warn = True
+            if s.momentum is not None and s.momentum > 200:
+                s.overheat = True  # 파라볼릭 — '지금 사기엔 늦음'
 
-            # '앞으로 오른다' 렌즈(growth_score) — 저평가가 아니라 전망·성장·모멘텀 중심
-            g = []
-            # 이익 상향(추정PER < 현재PER) ·목표가 상승여력·투자의견
-            if s.forward_score:
-                g.append(("fwd", s.forward_score, 1.0))            # [-0.5,0.5]
-            # 추세추종: 1년 모멘텀(보상, 과열 캡)
-            if s.momentum is not None:
-                g.append(("mom", max(-0.5, min(0.6, s.momentum / 100.0)), 0.8))
-            # 이익 성장 추세(3년 순이익)
-            if s.income_trend and s.income_trend.get("trend"):
-                g.append(("trend", {"up": 0.3, "mixed": 0.0, "down": -0.3}
-                          .get(s.income_trend["trend"], 0.0), 1.0))
-            # PEG(성장 대비 합리적 밸류)
-            if s.peg is not None and s.peg > 0:
-                g.append(("peg", max(-0.3, min(0.4, (1.5 - s.peg) / 1.5)), 0.5))
-            # ROIC 품질
-            if s.roic is not None:
-                g.append(("roic", max(0.0, min(0.4, s.roic / 100.0)), 0.5))
-            s.growth_score = round(sum(v * w for _, v, w in g), 3) if g else 0.0
+            # 앞으로(growth) 렌즈 — 퀄리티+모멘텀+이익상향 중심
+            g = sum(wg[k] * F[k] for k in F)
+            if s.momentum is not None and s.momentum > 150:  # 과열 점진 감점
+                g -= min(1.0, (s.momentum - 150) / 400.0)
+            s.growth_score = round(g, 3)
 
 
 def pick_top(stocks: list[Stock], n: int = 10) -> list[Stock]:
@@ -1143,12 +1195,13 @@ def pick_top(stocks: list[Stock], n: int = 10) -> list[Stock]:
 
 
 def pick_top_growth(stocks: list[Stock], n: int = 10) -> list[Stock]:
-    """'앞으로 오른다' 렌즈 — growth_score(전망·성장·모멘텀) 순 Top N.
+    """'앞으로 오른다' 렌즈 — growth_score(퀄리티·모멘텀·이익상향) 순 Top N.
 
-    저평가(싸다)가 아니라 ①이익 전망 상향 ②목표가 상승여력·투자의견 ③주가 모멘텀
-    ④이익 성장 추세 ⑤성장 대비 밸류(PEG)·ROIC 품질을 종합한다.
-    단, 1년 -15%↓ 하락추세(가치 함정)인 종목은 제외(추세 확인 전까지)."""
-    pool = [s for s in stocks if not s.trend_warn and s.growth_score]
+    기관식 멀티팩터: Quality(예측력 1위)+Momentum(12-1개월·52주 신고가 근접)+
+    Forward(목표가 상승여력·이익추정 상향·투자의견)을 섹터 중립 z-score로 종합.
+    52주 신고가 근접은 '지금 사도 안 늦은 승자' 신호로 가점, 파라볼릭(+150%↑)은 감점.
+    하락추세(가치 함정)는 제외한다."""
+    pool = [s for s in stocks if not s.trend_warn]
     return sorted(pool, key=lambda s: s.growth_score, reverse=True)[:n]
 
 
@@ -1289,7 +1342,10 @@ def build_dashboard(stocks: list[Stock], top: list[Stock], as_of: str,
             "level": level, "verdict": verdict, "rank": rank,
             "composite": round(s.composite, 3), "sectorRank": sec_rank.get(s.name),
             "growthScore": round(s.growth_score, 3), "cycleWarn": s.cycle_warn,
-            "momentumShort": s.momentum_short,
+            "overheat": s.overheat, "momentumShort": s.momentum_short,
+            "high52Prox": s.high52_prox,
+            "factors": {"value": s.f_value, "quality": s.f_quality, "momentum": s.f_momentum,
+                        "forward": s.f_forward, "growth": s.f_growth},
             "ev_ebitda": s.ev_ebitda, "roic": s.roic, "peg": s.peg,
             "reasons": reasons, "safety": s.safety_flags, "supply": s.supply,
             "incomeTrend": s.income_trend,
@@ -1492,16 +1548,18 @@ def build_markdown(stocks: list[Stock], top: list[Stock], as_of: str, mode: str,
             flags.append("[하락주의]")
         if s.cycle_warn:
             flags.append("[사이클고점주의]")
+        if s.overheat:
+            flags.append("[과열주의]")
         out.append(
             f"| {s.section} | **{i}. {s.name}** ({s.ticker}) | {delta_str(s.name)} | {s.composite:.3f} | "
             f"{fmt(s.per)} | {fmt(s.pbr)} | {fmt(s.ev_ebitda)} | "
             f"{fmt(s.roic, '%')} | {fmt(s.peg)} | {mom} | {' '.join(flags)} |"
         )
     out.append("")
-    out.append("<sub>전체 종합점수 순(<b>저평가=현재 동종업계 대비 싼 정도</b>, 예측 아님). "
-               "`전일대비`는 어제 순위 대비 변동(▲상승/▼하락/NEW), "
-               "`[하락주의]`=최근 1년/3개월 주가 하락(가치 함정 가능), "
-               "`[사이클고점주의]`=경기민감주의 저PER 착시(실적 정점 가능)입니다.</sub>")
+    out.append("<sub>종합점수 = <b>기관식 멀티팩터 z-score</b>(섹터 중립)로, 저평가 렌즈는 "
+               "Value(쌀수록↑) 중심에 Quality·Forward를 섹터 성격별로 가중한 값입니다. "
+               "`전일대비`=어제 순위 대비(▲/▼/NEW), `[하락주의]`=1년/3개월 하락(가치 함정), "
+               "`[사이클고점주의]`=경기민감주 저PER 착시, `[과열주의]`=1년 +200%↑ 파라볼릭(지금 사기엔 늦을 수 있음).</sub>")
     out.append("")
 
     # --- 📈 앞으로 주목 — 성장·모멘텀 Top 10 (전망 중심, 저평가와 다른 렌즈) ---
@@ -1509,26 +1567,29 @@ def build_markdown(stocks: list[Stock], top: list[Stock], as_of: str, mode: str,
         out.append("## 📈 앞으로 주목 — 성장·모멘텀 Top 10")
         out.append("")
         out.append("> '싸다(저평가)'가 아니라 **'앞으로 오를 동력'**에 초점을 둔 별도 순위입니다. "
-                   "①이익 전망 상향(추정PER<현재PER) ②목표가 상승여력·투자의견 ③주가 모멘텀 "
-                   "④이익 성장 추세 ⑤성장 대비 밸류(PEG)·ROIC 품질을 종합했습니다. "
-                   "하락 추세(가치 함정) 종목은 제외했습니다. **미래 수익을 보장하지 않습니다.**")
+                   "실제 기관이 쓰는 멀티팩터 방식으로, **Quality(ROIC·예측력 1위)·"
+                   "Momentum(12-1개월 + 52주 신고가 근접)·Forward(목표가 상승여력·이익추정 상향·투자의견)**를 "
+                   "섹터 중립 z-score로 종합했습니다. **52주 신고가 근처 = '지금 사도 안 늦은 승자'**로 가점하되, "
+                   "1년 +150%↑ 파라볼릭은 감점, 하락추세는 제외했습니다. **미래 수익을 보장하지 않습니다.**")
         out.append("")
-        out.append("| 섹션 | 종목 | 성장점수 | 추정PER | 목표가상승여력 | 투자의견 | 1년주가 | 비고 |")
-        out.append("|:---|:---|---:|---:|---:|---:|---:|:---|")
+        out.append("| 섹션 | 종목 | 성장점수 | 52주신고가대비 | 목표가상승여력 | 이익전망 | 투자의견 | 1년주가 | 비고 |")
+        out.append("|:---|:---|---:|---:|---:|:---:|---:|---:|:---|")
         for i, s in enumerate(top_growth, 1):
             mom = f"{s.momentum:+g}%" if s.momentum is not None else "—"
             px = (s.last_close or {}).get("price")
             ups = f"{(s.target_price/px-1)*100:+.0f}%" if (s.target_price and px) else "—"
+            prox = f"{s.high52_prox*100:.0f}%" if s.high52_prox else "—"
+            erev = "상향" if (s.per and s.forward_pe and s.forward_pe < s.per) else "—"
             rec = f"{s.recomm_mean}" if s.recomm_mean else "—"
-            note = "[사이클고점주의]" if s.cycle_warn else ""
+            note = "[과열주의]" if s.overheat else ("[사이클고점주의]" if s.cycle_warn else "")
             out.append(
                 f"| {s.section} | **{i}. {s.name}** ({s.ticker}) | {s.growth_score:.3f} | "
-                f"{fmt(s.forward_pe)} | {ups} | {rec} | {mom} | {note} |"
+                f"{prox} | {ups} | {erev} | {rec} | {mom} | {note} |"
             )
         out.append("")
         out.append("<sub>성장점수↑ = 전망·성장·모멘텀이 좋다는 뜻이지 '싸다'가 아닙니다. "
-                   "이미 많이 오른 종목이 많아 변동성·되돌림 위험이 큽니다. "
-                   "`투자의견`은 1(적극매수)~5(매도) 평균입니다.</sub>")
+                   "`52주신고가대비`=현재가/52주최고(100%면 신고가). `이익전망 상향`=추정PER<현재PER. "
+                   "`투자의견`=1(적극매수)~5(매도) 평균. `[과열주의]`=이미 너무 올라 되돌림 위험.</sub>")
         out.append("")
 
     # --- 성과 추적 (과거 Top 10의 현재까지 수익률) ---

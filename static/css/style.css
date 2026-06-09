@@ -303,6 +303,20 @@ summary { cursor: pointer; font-weight: 650; }
 .sc-score { margin-left: auto; font-weight: 700; color: #374151; font-size: .9rem;
   font-variant-numeric: tabular-nums; }
 
+/* 팩터 분해 막대 */
+.factor-box { background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-sm); padding: 12px 16px; margin: 14px 0; }
+.fb-title { font-weight: 700; font-size: .88rem; margin-bottom: 8px; }
+.fb-title small { color: var(--faint); font-weight: 400; }
+.fb-row { display: grid; grid-template-columns: 52px 1fr 48px; align-items: center; gap: 10px; margin: 5px 0; }
+.fb-k { font-size: .82rem; color: var(--muted); font-weight: 600; }
+.fb-track { position: relative; height: 8px; background: #eceef3; border-radius: 999px; }
+.fb-mid { position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--border-strong); }
+.fb-fill { position: absolute; top: 0; bottom: 0; border-radius: 999px; }
+.fb-fill.pos { background: var(--good); }
+.fb-fill.neg { background: var(--down); opacity: .8; }
+.fb-v { font-size: .8rem; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+
 /* ---------- 반응형 ---------- */
 @media (max-width: 560px) {
   .container { padding: 6px 16px 64px; }

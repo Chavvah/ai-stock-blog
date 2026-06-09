@@ -29,6 +29,7 @@
     var f = "";
     if (s.trendWarn) f += ' <span class="mini-warn" title="최근 1년/3개월 하락 추세 — 가치 함정 가능">▼하락주의</span>';
     if (s.cycleWarn) f += ' <span class="mini-warn cyc" title="경기민감주 저PER 착시(실적 정점 가능)">⟳고점주의</span>';
+    if (s.overheat) f += ' <span class="mini-warn cyc" title="1년 +200%↑ 파라볼릭 — 지금 사기엔 늦을 수 있음">🔥과열</span>';
     return f;
   }
 
@@ -55,20 +56,21 @@
       var px = s.lastClose ? s.lastClose.price : null;
       var ups = (s.target && px) ? (((s.target / px - 1) * 100 >= 0 ? "+" : "") +
                 ((s.target / px - 1) * 100).toFixed(0) + "%") : "—";
+      var prox = s.high52Prox != null ? (s.high52Prox * 100).toFixed(0) + "%" : "—";
       return "<tr><td>" + (i + 1) + "</td>" +
         "<td class=\"sn\"><b>" + n + "</b> <span class=\"tk\">" + s.ticker + "</span>" + flags(s) + "</td>" +
         "<td>" + (s.growthScore != null ? s.growthScore.toFixed(3) : "—") + "</td>" +
-        "<td>" + num(s.forwardPE) + "</td>" +
+        "<td>" + prox + "</td>" +
         "<td>" + ups + "</td>" +
         "<td>" + pct(s.momentum) + "</td></tr>";
     }).join("");
     return '<details class="sector-acc growth-acc" open><summary>' +
       '<span class="sec-emoji">📈</span><span class="sec-name">앞으로 주목 — 성장·모멘텀 Top ' + names.length + '</span>' +
       '<span class="sec-count">전망 중심</span></summary>' +
-      '<p class="sec-desc">‘싸다’가 아니라 <b>이익 전망·목표가 상승여력·성장·모멘텀</b>을 종합한 순위입니다. ' +
-      '하락추세 종목은 제외. <b>미래 수익을 보장하지 않습니다.</b></p>' +
+      '<p class="sec-desc">‘싸다’가 아니라 <b>퀄리티·모멘텀(52주 신고가 근접)·이익전망</b>을 종합한 기관식 순위입니다. ' +
+      '<b>52주신고가 근처 = 지금 사도 안 늦은 승자</b>. 하락추세 제외·과열 감점. <b>미래 수익 보장 아님.</b></p>' +
       '<div class="table-scroll"><table class="sec-table"><thead><tr>' +
-      '<th>#</th><th>종목</th><th>성장점수</th><th>추정PER</th><th>목표가여력</th><th>1년주가</th>' +
+      '<th>#</th><th>종목</th><th>성장점수</th><th title="현재가/52주최고">52주신고가대비</th><th>목표가여력</th><th>1년주가</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table></div></details>';
   }
 
